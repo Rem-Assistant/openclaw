@@ -35,6 +35,7 @@ import {
   resolveClaudeFable5ModelIdentity,
   resolveClaudeModelIdentity,
   resolveClaudeMythos5ModelIdentity,
+  resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   resolveClaudeThinkingProfile,
   supportsClaudeAdaptiveThinking,
@@ -82,13 +83,19 @@ function classifyAnthropicFailoverDescriptor(value: string | undefined) {
   }
 }
 type UpsertAuthProfileParams = Parameters<typeof upsertAuthProfileWithLock>[0];
-const DEFAULT_ANTHROPIC_MODEL = "anthropic/claude-opus-4-8";
+const DEFAULT_ANTHROPIC_MODEL = "anthropic/claude-opus-5";
 const ANTHROPIC_OPUS_48_MODEL_ID = "claude-opus-4-8";
 const ANTHROPIC_OPUS_48_DOT_MODEL_ID = "claude-opus-4.8";
 const ANTHROPIC_OPUS_47_MODEL_ID = "claude-opus-4-7";
 const ANTHROPIC_OPUS_47_DOT_MODEL_ID = "claude-opus-4.7";
 const ANTHROPIC_1M_CONTEXT_TOKENS = 1_000_000;
 const ANTHROPIC_MODERN_MAX_OUTPUT_TOKENS = 128_000;
+const ANTHROPIC_OPUS_5_COST = {
+  input: 5,
+  output: 25,
+  cacheRead: 0.5,
+  cacheWrite: 6.25,
+};
 // Anthropic's introductory rate expires at the documented UTC month boundary.
 const ANTHROPIC_SONNET_5_STANDARD_PRICING_START_MS = Date.UTC(2026, 8, 1);
 const ANTHROPIC_SONNET_5_PROMOTIONAL_COST = {
@@ -358,9 +365,11 @@ function buildAnthropicForwardCompatModel(
     input: ["text", "image"],
     cost: isAnthropicMandatoryClaude5Model(trimmedModelId)
       ? { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }
-      : isAnthropicSonnet5Model(trimmedModelId) && provider === PROVIDER_ID
-        ? resolveAnthropicSonnet5Cost()
-        : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      : isAnthropicOpus5Model(trimmedModelId) && provider === PROVIDER_ID
+        ? ANTHROPIC_OPUS_5_COST
+        : isAnthropicSonnet5Model(trimmedModelId) && provider === PROVIDER_ID
+          ? resolveAnthropicSonnet5Cost()
+          : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: resolveAnthropicFixedContextWindow(provider, trimmedModelId) ?? 200_000,
     maxTokens: isAnthropic128kOutputModel(trimmedModelId)
       ? ANTHROPIC_MODERN_MAX_OUTPUT_TOKENS
@@ -437,12 +446,17 @@ function isAnthropicMandatoryClaude5Model(modelId: string): boolean {
   return isAnthropicFable5Model(modelId) || isAnthropicMythos5Model(modelId);
 }
 
+function isAnthropicOpus5Model(modelId: string): boolean {
+  return resolveClaudeOpus5ModelIdentity({ id: modelId }) !== undefined;
+}
+
 function isAnthropicSonnet5Model(modelId: string): boolean {
   return resolveClaudeSonnet5ModelIdentity({ id: modelId }) !== undefined;
 }
 
 function resolveAnthropicFixedContextWindow(provider: string, modelId: string): number | undefined {
   return isAnthropicMandatoryClaude5Model(modelId) ||
+    isAnthropicOpus5Model(modelId) ||
     isAnthropicSonnet5Model(modelId) ||
     (isAnthropicGa1MModel(modelId) &&
       (normalizeLowercaseStringOrEmpty(provider) !== CLAUDE_CLI_BACKEND_ID ||
@@ -528,6 +542,7 @@ function applyAnthropicFixedContextWindow(params: {
   }
   const exactContextWindow =
     isAnthropicMandatoryClaude5Model(params.contractModelId) ||
+    isAnthropicOpus5Model(params.contractModelId) ||
     isAnthropicSonnet5Model(params.contractModelId);
   const nextContextWindow = exactContextWindow
     ? fixedContextWindow
@@ -641,6 +656,19 @@ function applyAnthropicImageInputCapability(params: {
   };
 }
 
+function applyAnthropicOpus5Cost(params: {
+  modelId: string;
+  model: ProviderRuntimeModel;
+}): ProviderRuntimeModel | undefined {
+  if (!isAnthropicOpus5Model(params.modelId)) {
+    return undefined;
+  }
+  if (modelCostsEqual(params.model.cost, ANTHROPIC_OPUS_5_COST)) {
+    return undefined;
+  }
+  return { ...params.model, cost: ANTHROPIC_OPUS_5_COST };
+}
+
 function applyAnthropicSonnet5Cost(params: {
   modelId: string;
   model: ProviderRuntimeModel;
@@ -670,6 +698,7 @@ function normalizeAnthropicResolvedModel(
   }
   const contractModel =
     (isAnthropicMandatoryClaude5Model(contractModelId) ||
+      isAnthropicOpus5Model(contractModelId) ||
       isAnthropicSonnet5Model(contractModelId)) &&
     !ctx.model.reasoning
       ? { ...ctx.model, reasoning: true }
@@ -713,10 +742,15 @@ function normalizeAnthropicResolvedModel(
     }) ?? thinkingLevelModel;
   const pricingModel =
     normalizeLowercaseStringOrEmpty(ctx.provider) === PROVIDER_ID
-      ? (applyAnthropicSonnet5Cost({
+      ? (applyAnthropicOpus5Cost({
           modelId: contractModelId,
           model: contextWindowModel,
-        }) ?? contextWindowModel)
+        }) ??
+        applyAnthropicSonnet5Cost({
+          modelId: contractModelId,
+          model: contextWindowModel,
+        }) ??
+        contextWindowModel)
       : contextWindowModel;
   return pricingModel === ctx.model ? undefined : pricingModel;
 }
