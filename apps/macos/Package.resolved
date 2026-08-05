@@ -22,9 +22,9 @@
     {
       "identity" : "elevenlabskit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/steipete/ElevenLabsKit",
+      "location" : "https://github.com/Rem-Assistant/ElevenLabsKit",
       "state" : {
-        "revision" : "da82948cae46148512d7cc86db13a9fe9d6130b2"
+        "revision" : "9a908266eb9bdb63c04d6391b19242cab07b1ce0"
       }
     },
     {
