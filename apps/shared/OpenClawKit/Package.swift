@@ -14,7 +14,12 @@ let package = Package(
         .library(name: "OpenClawChatUI", targets: ["OpenClawChatUI"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/steipete/ElevenLabsKit", exact: "0.1.1"),
+        // Pin the upstream playback-lifecycle fix until ElevenLabsKit tags its next release.
+        // The fix isolates replacement PCM generations and cancels stopped MP3/PCM streams,
+        // preventing stale buffers from cutting off or skipping between queued sentences.
+        .package(
+            url: "https://github.com/steipete/ElevenLabsKit",
+            revision: "da82948cae46148512d7cc86db13a9fe9d6130b2"),
         .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
     ],
     targets: [
