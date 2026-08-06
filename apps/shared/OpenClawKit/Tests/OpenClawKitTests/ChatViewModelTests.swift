@@ -283,6 +283,7 @@ private actor TestChatTransportState {
     var abortedRunIds: [String] = []
     var patchedModels: [String?] = []
     var patchedThinkingLevels: [String] = []
+    var sendPreparationPhases: [OpenClawChatSendPreparationPhase] = []
 }
 
 private final class TestChatTransport: @unchecked Sendable, OpenClawChatTransport {
@@ -367,6 +368,16 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
+    }
+
+    func observeSendPreparation(
+        sessionKey _: String,
+        idempotencyKey _: String,
+        phase: OpenClawChatSendPreparationPhase,
+        messageLength _: Int,
+        attachmentsCount _: Int
+    ) async {
+        await self.state.sendPreparationPhasesAppend(phase)
     }
 
     func abortRun(sessionKey _: String, runId: String) async throws {
@@ -456,6 +467,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         await self.state.patchedThinkingLevels
     }
 
+    func sendPreparationPhases() async -> [OpenClawChatSendPreparationPhase] {
+        await self.state.sendPreparationPhases
+    }
+
     func resetSessionKeys() async -> [String] {
         await self.state.resetSessionKeys
     }
@@ -496,6 +511,10 @@ extension TestChatTransportState {
 
     fileprivate func patchedThinkingLevelsAppend(_ v: String) {
         self.patchedThinkingLevels.append(v)
+    }
+
+    fileprivate func sendPreparationPhasesAppend(_ phase: OpenClawChatSendPreparationPhase) {
+        self.sendPreparationPhases.append(phase)
     }
 
     fileprivate func resetSessionKeysAppend(_ v: String) {
@@ -1539,6 +1558,11 @@ extension TestChatTransportState {
             await MainActor.run { vm.isSending }
         }
         #expect(await transport.lastSentRunId() == nil)
+        #expect(await transport.sendPreparationPhases() == [
+            .started,
+            .optimisticAppendCompleted,
+            .modelPatchWaitStarted,
+        ])
 
         await MainActor.run { vm.selectThinkingLevel("high") }
         try await waitUntil("thinking level changed while send is blocked") {
@@ -1550,6 +1574,12 @@ extension TestChatTransportState {
         try await waitUntil("send released after model patch") {
             await transport.lastSentRunId() != nil
         }
+        #expect(await transport.sendPreparationPhases() == [
+            .started,
+            .optimisticAppendCompleted,
+            .modelPatchWaitStarted,
+            .modelPatchWaitEnded,
+        ])
         #expect(await transport.sentThinkingLevels() == ["off"])
     }
 

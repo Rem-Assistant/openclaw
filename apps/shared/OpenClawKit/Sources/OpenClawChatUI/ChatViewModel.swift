@@ -650,6 +650,13 @@ public final class OpenClawChatViewModel {
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
 
+        await self.transport.observeSendPreparation(
+            sessionKey: sessionKey,
+            idempotencyKey: runId,
+            phase: .started,
+            messageLength: messageText.count,
+            attachmentsCount: self.attachments.count)
+
         // Optimistically append user message to UI.
         var userContent: [OpenClawChatMessageContent] = [
             OpenClawChatMessageContent(
@@ -691,13 +698,31 @@ public final class OpenClawChatViewModel {
                 role: "user",
                 content: userContent,
                 timestamp: Date().timeIntervalSince1970 * 1000))
+        await self.transport.observeSendPreparation(
+            sessionKey: sessionKey,
+            idempotencyKey: runId,
+            phase: .optimisticAppendCompleted,
+            messageLength: messageText.count,
+            attachmentsCount: encodedAttachments.count)
 
         // Clear input immediately for responsive UX (before network await)
         self.input = ""
         self.attachments = []
 
         do {
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .modelPatchWaitStarted,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
             await self.waitForPendingModelPatches(in: sessionKey)
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .modelPatchWaitEnded,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
             let response = try await self.transport.sendMessage(
                 sessionKey: sessionKey,
                 message: messageText,
