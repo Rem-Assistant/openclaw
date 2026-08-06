@@ -9,6 +9,17 @@ public enum OpenClawChatTransportEvent: Sendable {
     case seqGap
 }
 
+/// Privacy-safe lifecycle markers emitted before `chat.send` reaches the transport.
+///
+/// Transports may use these markers for explicitly enabled diagnostics. The markers carry only
+/// correlation IDs already used by `chat.send`, counts, and phase names—never message content.
+public enum OpenClawChatSendPreparationPhase: String, Sendable {
+    case started
+    case optimisticAppendCompleted
+    case modelPatchWaitStarted
+    case modelPatchWaitEnded
+}
+
 public protocol OpenClawChatTransport: Sendable {
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload
     func listModels() async throws -> [OpenClawChatModelChoice]
@@ -18,6 +29,13 @@ public protocol OpenClawChatTransport: Sendable {
         thinking: String,
         idempotencyKey: String,
         attachments: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
+
+    func observeSendPreparation(
+        sessionKey: String,
+        idempotencyKey: String,
+        phase: OpenClawChatSendPreparationPhase,
+        messageLength: Int,
+        attachmentsCount: Int) async
 
     func abortRun(sessionKey: String, runId: String) async throws
     func listSessions(limit: Int?) async throws -> OpenClawChatSessionsListResponse
@@ -33,6 +51,13 @@ public protocol OpenClawChatTransport: Sendable {
 }
 
 extension OpenClawChatTransport {
+    public func observeSendPreparation(
+        sessionKey _: String,
+        idempotencyKey _: String,
+        phase _: OpenClawChatSendPreparationPhase,
+        messageLength _: Int,
+        attachmentsCount _: Int) async {}
+
     public func setActiveSessionKey(_: String) async throws {}
 
     public func resetSession(sessionKey _: String) async throws {
