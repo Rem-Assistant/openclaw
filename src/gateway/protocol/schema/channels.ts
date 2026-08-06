@@ -376,6 +376,29 @@ export const TalkCatalogResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const TalkVoicesParamsSchema = Type.Object({}, { additionalProperties: false });
+
+const TalkVoiceOptionSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    name: Type.Optional(Type.String()),
+    category: Type.Optional(Type.String()),
+    description: Type.Optional(Type.String()),
+    locale: Type.Optional(Type.String()),
+    gender: Type.Optional(Type.String()),
+    personalities: Type.Optional(Type.Array(Type.String())),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkVoicesResultSchema = Type.Object(
+  {
+    provider: NonEmptyString,
+    voices: Type.Array(TalkVoiceOptionSchema),
+  },
+  { additionalProperties: false },
+);
+
 const BrowserRealtimeAudioContractSchema = Type.Object(
   {
     inputEncoding: Type.Union([Type.Literal("pcm16"), Type.Literal("g711_ulaw")]),
