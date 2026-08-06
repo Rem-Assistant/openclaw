@@ -519,7 +519,9 @@ extension TestChatTransportState {
             let values = await completions.snapshot()
             return values.suffix(2) == ["a", "b"]
         }
-        #expect(await MainActor.run { vm.sessionKey } == "b")
+        try await waitUntil("session b bootstrap completed") {
+            await MainActor.run { vm.sessionKey == "b" && vm.sessionId == "session-b" && !vm.isLoading }
+        }
     }
 
     @Test func exhaustedStaleActivationRecoveryCannotBeMaskedByHealthPoll() async throws {
