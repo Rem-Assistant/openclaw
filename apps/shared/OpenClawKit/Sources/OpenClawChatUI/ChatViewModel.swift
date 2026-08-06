@@ -44,6 +44,12 @@ public final class OpenClawChatViewModel {
 
     @ObservationIgnored
     private nonisolated(unsafe) var eventTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var bootstrapTask: Task<Void, Never>?
+    private var nextBootstrapGeneration: UInt64 = 0
+    private var activeBootstrapGeneration: UInt64 = 0
+    private var sessionGeneration: UInt64 = 0
+    private var confirmedActiveSessionKey: String?
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
     }
@@ -106,17 +112,18 @@ public final class OpenClawChatViewModel {
 
     deinit {
         self.eventTask?.cancel()
+        self.bootstrapTask?.cancel()
         for (_, task) in self.pendingRunTimeoutTasks {
             task.cancel()
         }
     }
 
     public func load() {
-        Task { await self.bootstrap() }
+        self.startBootstrap()
     }
 
     public func refresh() {
-        Task { await self.bootstrap() }
+        self.startBootstrap()
     }
 
     public func send() {
@@ -132,7 +139,14 @@ public final class OpenClawChatViewModel {
     }
 
     public func switchSession(to sessionKey: String) {
-        Task { await self.performSwitchSession(to: sessionKey) }
+        let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !next.isEmpty else { return }
+        guard next != self.sessionKey else { return }
+        self.sessionGeneration &+= 1
+        self.sessionKey = next
+        self.confirmedActiveSessionKey = nil
+        self.modelSelectionID = Self.defaultModelSelectionID
+        self.startBootstrap()
     }
 
     public func selectThinkingLevel(_ level: String) {
@@ -230,23 +244,109 @@ public final class OpenClawChatViewModel {
 
     // MARK: - Internals
 
-    private func bootstrap() async {
+    private struct BootstrapRequest: Equatable {
+        var generation: UInt64
+        var sessionKey: String
+        var sessionGeneration: UInt64
+    }
+
+    private struct SessionRequest: Equatable {
+        var sessionKey: String
+        var generation: UInt64
+    }
+
+    private func startBootstrap() {
+        self.bootstrapTask?.cancel()
+        self.nextBootstrapGeneration &+= 1
+        let request = BootstrapRequest(
+            generation: self.nextBootstrapGeneration,
+            sessionKey: self.sessionKey,
+            sessionGeneration: self.sessionGeneration)
+        self.activeBootstrapGeneration = request.generation
         self.isLoading = true
+        self.bootstrapTask = Task { [weak self] in
+            guard let self else { return }
+            await self.bootstrap(request: request)
+        }
+    }
+
+    private func isCurrentBootstrap(_ request: BootstrapRequest) -> Bool {
+        request.generation == self.activeBootstrapGeneration &&
+            request.sessionKey == self.sessionKey &&
+            request.sessionGeneration == self.sessionGeneration
+    }
+
+    private func currentSessionRequest() -> SessionRequest {
+        SessionRequest(sessionKey: self.sessionKey, generation: self.sessionGeneration)
+    }
+
+    private func isCurrentSessionRequest(_ request: SessionRequest) -> Bool {
+        request.sessionKey == self.sessionKey && request.generation == self.sessionGeneration
+    }
+
+    private func setTransportActiveSession(for request: BootstrapRequest) async {
+        var activated = false
+        do {
+            try await self.transport.setActiveSessionKey(request.sessionKey)
+            activated = true
+        } catch {
+            // Best-effort only; history/send/health still work without push events.
+        }
+        if self.isCurrentBootstrap(request) {
+            if activated {
+                self.confirmedActiveSessionKey = request.sessionKey
+            } else if self.confirmedActiveSessionKey != request.sessionKey {
+                self.confirmedActiveSessionKey = nil
+            }
+            return
+        }
+
+        // Cancellation is best-effort at the transport boundary. If an older request finishes
+        // last, reassert the newest key. A transient failure must not be mistaken for success;
+        // retry a bounded number of times and mark health unavailable if the subscription cannot
+        // be restored. A later load/refresh will attempt activation again.
+        var failures = 0
+        while failures < 3 {
+            let latest = self.currentSessionRequest()
+            do {
+                try await self.transport.setActiveSessionKey(latest.sessionKey)
+                if self.isCurrentSessionRequest(latest) {
+                    self.confirmedActiveSessionKey = latest.sessionKey
+                    return
+                }
+                failures = 0
+            } catch {
+                failures += 1
+                if failures < 3 {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+            }
+        }
+        self.confirmedActiveSessionKey = nil
+        self.healthOK = false
+        chatUILogger.error("unable to restore active chat session after stale activation")
+    }
+
+    private func bootstrap(request: BootstrapRequest) async {
+        guard self.isCurrentBootstrap(request) else { return }
         self.errorText = nil
         self.healthOK = false
         self.clearPendingRuns(reason: nil)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
         self.sessionId = nil
-        defer { self.isLoading = false }
-        do {
-            do {
-                try await self.transport.setActiveSessionKey(self.sessionKey)
-            } catch {
-                // Best-effort only; history/send/health still work without push events.
+        defer {
+            if self.isCurrentBootstrap(request) {
+                self.isLoading = false
+                self.bootstrapTask = nil
             }
+        }
+        do {
+            await self.setTransportActiveSession(for: request)
+            guard self.isCurrentBootstrap(request) else { return }
 
-            let payload = try await self.transport.requestHistory(sessionKey: self.sessionKey)
+            let payload = try await self.transport.requestHistory(sessionKey: request.sessionKey)
+            guard self.isCurrentBootstrap(request) else { return }
             self.messages = Self.reconcileMessageIDs(
                 previous: self.messages,
                 incoming: Self.decodeMessages(payload.messages ?? []))
@@ -257,11 +357,15 @@ public final class OpenClawChatViewModel {
                 self.thinkingLevel = level
             }
             self.syncThinkingLevelOptions()
-            await self.pollHealthIfNeeded(force: true)
-            await self.fetchSessions(limit: 50)
-            await self.fetchModels()
+            await self.pollHealthIfNeeded(force: true, bootstrapRequest: request)
+            guard self.isCurrentBootstrap(request) else { return }
+            await self.fetchSessions(limit: 50, bootstrapRequest: request)
+            guard self.isCurrentBootstrap(request) else { return }
+            await self.fetchModels(bootstrapRequest: request)
+            guard self.isCurrentBootstrap(request) else { return }
             self.errorText = nil
         } catch {
+            guard self.isCurrentBootstrap(request) else { return }
             self.errorText = error.localizedDescription
             chatUILogger.error("bootstrap failed \(error.localizedDescription, privacy: .public)")
         }
@@ -602,9 +706,14 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func fetchSessions(limit: Int?) async {
+    private func fetchSessions(
+        limit: Int?,
+        bootstrapRequest: BootstrapRequest? = nil
+    ) async {
+        if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
         do {
             let res = try await self.transport.listSessions(limit: limit)
+            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
             self.sessions = res.sessions
             self.sessionDefaults = res.defaults
             self.syncSelectedModel()
@@ -614,38 +723,34 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func fetchModels() async {
+    private func fetchModels(bootstrapRequest: BootstrapRequest? = nil) async {
+        if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
         do {
-            self.modelChoices = try await self.transport.listModels()
+            let choices = try await self.transport.listModels()
+            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
+            self.modelChoices = choices
             self.syncSelectedModel()
         } catch {
             // Best-effort.
         }
     }
 
-    private func performSwitchSession(to sessionKey: String) async {
-        let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !next.isEmpty else { return }
-        guard next != self.sessionKey else { return }
-        self.sessionKey = next
-        self.modelSelectionID = Self.defaultModelSelectionID
-        await self.bootstrap()
-    }
-
     private func performReset() async {
+        let request = self.currentSessionRequest()
         self.isLoading = true
         self.errorText = nil
-        defer { self.isLoading = false }
-
         do {
-            try await self.transport.resetSession(sessionKey: self.sessionKey)
+            try await self.transport.resetSession(sessionKey: request.sessionKey)
         } catch {
+            guard self.isCurrentSessionRequest(request) else { return }
+            self.isLoading = false
             self.errorText = error.localizedDescription
             chatUILogger.error("session reset failed \(error.localizedDescription, privacy: .public)")
             return
         }
 
-        await self.bootstrap()
+        guard self.isCurrentSessionRequest(request) else { return }
+        self.startBootstrap()
     }
 
     private func performCompact() async {
@@ -661,17 +766,19 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        let request = self.currentSessionRequest()
         self.isCompacting = true
         self.isLoading = true
         self.errorText = nil
-        defer {
+        do {
+            try await self.transport.compactSession(sessionKey: request.sessionKey)
+        } catch {
+            guard self.isCurrentSessionRequest(request) else {
+                self.isCompacting = false
+                return
+            }
             self.isLoading = false
             self.isCompacting = false
-        }
-
-        do {
-            try await self.transport.compactSession(sessionKey: self.sessionKey)
-        } catch {
             self.errorText = "Unable to compact the session. Please try again."
             let nsError = error as NSError
             chatUILogger.error(
@@ -680,8 +787,13 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        guard self.isCurrentSessionRequest(request) else {
+            self.isCompacting = false
+            return
+        }
         self.lastCompactAt = Date()
-        await self.bootstrap()
+        self.isCompacting = false
+        self.startBootstrap()
     }
 
     private func performSelectThinkingLevel(_ level: String) async {
@@ -1086,7 +1198,7 @@ public final class OpenClawChatViewModel {
     private func handleTransportEvent(_ evt: OpenClawChatTransportEvent) {
         switch evt {
         case let .health(ok):
-            self.healthOK = ok
+            self.healthOK = ok && self.confirmedActiveSessionKey == self.sessionKey
         case .tick:
             Task { await self.pollHealthIfNeeded(force: false) }
         case let .chat(chat):
@@ -1098,8 +1210,9 @@ public final class OpenClawChatViewModel {
         case .seqGap:
             self.errorText = nil
             self.clearPendingRuns(reason: nil)
+            let request = self.currentSessionRequest()
             Task {
-                await self.refreshHistoryAfterRun()
+                await self.refreshHistoryAfterRun(request: request)
                 await self.pollHealthIfNeeded(force: true)
             }
         }
@@ -1144,7 +1257,8 @@ public final class OpenClawChatViewModel {
             case "final", "aborted", "error":
                 self.streamingAssistantText = nil
                 self.pendingToolCallsById = [:]
-                Task { await self.refreshHistoryAfterRun() }
+                let request = self.currentSessionRequest()
+                Task { await self.refreshHistoryAfterRun(request: request) }
             default:
                 break
             }
@@ -1163,7 +1277,8 @@ public final class OpenClawChatViewModel {
             }
             self.pendingToolCallsById = [:]
             self.streamingAssistantText = nil
-            Task { await self.refreshHistoryAfterRun() }
+            let request = self.currentSessionRequest()
+            Task { await self.refreshHistoryAfterRun(request: request) }
         default:
             break
         }
@@ -1214,9 +1329,11 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func refreshHistoryAfterRun() async {
+    private func refreshHistoryAfterRun(request: SessionRequest) async {
+        guard self.isCurrentSessionRequest(request) else { return }
         do {
-            let payload = try await self.transport.requestHistory(sessionKey: self.sessionKey)
+            let payload = try await self.transport.requestHistory(sessionKey: request.sessionKey)
+            guard self.isCurrentSessionRequest(request) else { return }
             self.messages = Self.reconcileRunRefreshMessages(
                 previous: self.messages,
                 incoming: Self.decodeMessages(payload.messages ?? []))
@@ -1228,6 +1345,7 @@ public final class OpenClawChatViewModel {
                 self.syncThinkingLevelOptions()
             }
         } catch {
+            guard self.isCurrentSessionRequest(request) else { return }
             chatUILogger.error("refresh history failed \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -1263,15 +1381,21 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func pollHealthIfNeeded(force: Bool) async {
+    private func pollHealthIfNeeded(
+        force: Bool,
+        bootstrapRequest: BootstrapRequest? = nil
+    ) async {
+        if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
         if !force, let last = self.lastHealthPollAt, Date().timeIntervalSince(last) < 10 {
             return
         }
         self.lastHealthPollAt = Date()
         do {
             let ok = try await self.transport.requestHealth(timeoutMs: 5000)
-            self.healthOK = ok
+            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
+            self.healthOK = ok && self.confirmedActiveSessionKey == self.sessionKey
         } catch {
+            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
             self.healthOK = false
         }
     }

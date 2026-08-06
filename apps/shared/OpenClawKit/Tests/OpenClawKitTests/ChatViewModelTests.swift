@@ -85,6 +85,9 @@ private func modelChoice(id: String, name: String, provider: String = "anthropic
 private func makeViewModel(
     sessionKey: String = "main",
     historyResponses: [OpenClawChatHistoryPayload],
+    historyRequestHook: (@Sendable (String) async throws -> OpenClawChatHistoryPayload)? = nil,
+    setActiveSessionHook: (@Sendable (String) async throws -> Void)? = nil,
+    requestHealthHook: (@Sendable () async throws -> Bool)? = nil,
     sessionsResponses: [OpenClawChatSessionsListResponse] = [],
     modelResponses: [[OpenClawChatModelChoice]] = [],
     resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
@@ -97,6 +100,9 @@ private func makeViewModel(
 {
     let transport = TestChatTransport(
         historyResponses: historyResponses,
+        historyRequestHook: historyRequestHook,
+        setActiveSessionHook: setActiveSessionHook,
+        requestHealthHook: requestHealthHook,
         sessionsResponses: sessionsResponses,
         modelResponses: modelResponses,
         resetSessionHook: resetSessionHook,
@@ -236,6 +242,22 @@ private actor AsyncCounter {
         self.value += 1
         return self.value
     }
+
+    func current() -> Int {
+        self.value
+    }
+}
+
+private actor StringRecorder {
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        self.values.append(value)
+    }
+
+    func snapshot() -> [String] {
+        self.values
+    }
 }
 
 private actor TestChatTransportState {
@@ -254,6 +276,9 @@ private actor TestChatTransportState {
 private final class TestChatTransport: @unchecked Sendable, OpenClawChatTransport {
     private let state = TestChatTransportState()
     private let historyResponses: [OpenClawChatHistoryPayload]
+    private let historyRequestHook: (@Sendable (String) async throws -> OpenClawChatHistoryPayload)?
+    private let setActiveSessionHook: (@Sendable (String) async throws -> Void)?
+    private let requestHealthHook: (@Sendable () async throws -> Bool)?
     private let sessionsResponses: [OpenClawChatSessionsListResponse]
     private let modelResponses: [[OpenClawChatModelChoice]]
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
@@ -266,6 +291,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
 
     init(
         historyResponses: [OpenClawChatHistoryPayload],
+        historyRequestHook: (@Sendable (String) async throws -> OpenClawChatHistoryPayload)? = nil,
+        setActiveSessionHook: (@Sendable (String) async throws -> Void)? = nil,
+        requestHealthHook: (@Sendable () async throws -> Bool)? = nil,
         sessionsResponses: [OpenClawChatSessionsListResponse] = [],
         modelResponses: [[OpenClawChatModelChoice]] = [],
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
@@ -274,6 +302,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil)
     {
         self.historyResponses = historyResponses
+        self.historyRequestHook = historyRequestHook
+        self.setActiveSessionHook = setActiveSessionHook
+        self.requestHealthHook = requestHealthHook
         self.sessionsResponses = sessionsResponses
         self.modelResponses = modelResponses
         self.resetSessionHook = resetSessionHook
@@ -291,9 +322,14 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.stream
     }
 
-    func setActiveSessionKey(_: String) async throws {}
+    func setActiveSessionKey(_ sessionKey: String) async throws {
+        try await self.setActiveSessionHook?(sessionKey)
+    }
 
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload {
+        if let historyRequestHook = self.historyRequestHook {
+            return try await historyRequestHook(sessionKey)
+        }
         let idx = await self.state.historyCallCount
         await self.state.setHistoryCallCount(idx + 1)
         if idx < self.historyResponses.count {
@@ -374,7 +410,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     }
 
     func requestHealth(timeoutMs _: Int) async throws -> Bool {
-        true
+        try await self.requestHealthHook?() ?? true
     }
 
     func emit(_ evt: OpenClawChatTransportEvent) {
@@ -454,6 +490,130 @@ extension TestChatTransportState {
 }
 
 @Suite struct ChatViewModelTests {
+    @Test func staleActiveSessionCompletionRetriesAndReassertsLatestKey() async throws {
+        let aGate = AsyncGate()
+        let aRequests = AsyncCounter()
+        let bRequests = AsyncCounter()
+        let completions = StringRecorder()
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload(sessionKey: "b", sessionId: "session-b")],
+            setActiveSessionHook: { sessionKey in
+                if sessionKey == "a" {
+                    _ = await aRequests.increment()
+                    await aGate.wait()
+                }
+                if sessionKey == "b", await bRequests.increment() == 2 {
+                    throw NSError(domain: "TransientActivation", code: 1)
+                }
+                await completions.append(sessionKey)
+            })
+        await MainActor.run { vm.switchSession(to: "a") }
+        try await waitUntil("session a activation started") { await aRequests.current() == 1 }
+        await MainActor.run { vm.switchSession(to: "b") }
+        try await waitUntil("session b activation completed") {
+            await completions.snapshot().contains("b")
+        }
+
+        await aGate.open()
+        try await waitUntil("latest session key reasserted") {
+            let values = await completions.snapshot()
+            return values.suffix(2) == ["a", "b"]
+        }
+        #expect(await MainActor.run { vm.sessionKey } == "b")
+    }
+
+    @Test func exhaustedStaleActivationRecoveryCannotBeMaskedByHealthPoll() async throws {
+        let aGate = AsyncGate()
+        let healthGate = AsyncGate()
+        let aRequests = AsyncCounter()
+        let bAttempts = AsyncCounter()
+        let healthRequests = AsyncCounter()
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload(sessionKey: "b", sessionId: "session-b")],
+            setActiveSessionHook: { sessionKey in
+                if sessionKey == "a" {
+                    _ = await aRequests.increment()
+                    await aGate.wait()
+                    return
+                }
+                if sessionKey == "b", await bAttempts.increment() > 1 {
+                    throw NSError(domain: "PersistentActivation", code: 1)
+                }
+            },
+            requestHealthHook: {
+                _ = await healthRequests.increment()
+                await healthGate.wait()
+                return true
+            })
+
+        await MainActor.run { vm.switchSession(to: "a") }
+        try await waitUntil("session a activation started") { await aRequests.current() == 1 }
+        await MainActor.run { vm.switchSession(to: "b") }
+        try await waitUntil("session b health pending") { await healthRequests.current() == 1 }
+
+        await aGate.open()
+        try await waitUntil("stale activation retries exhausted") { await bAttempts.current() == 4 }
+        await healthGate.open()
+        try await waitUntil("session b bootstrap completed without masking activation failure") {
+            await MainActor.run { vm.sessionId == "session-b" && !vm.isLoading && !vm.healthOK }
+        }
+    }
+
+    @Test func latestSessionSwitchOwnsHistoryAndLoadingState() async throws {
+        let aGate = AsyncGate()
+        let bGate = AsyncGate()
+        let aRequests = AsyncCounter()
+        let bRequests = AsyncCounter()
+        let aCompletions = AsyncCounter()
+        let transport = TestChatTransport(
+            historyResponses: [],
+            historyRequestHook: { sessionKey in
+                switch sessionKey {
+                case "a":
+                    _ = await aRequests.increment()
+                    await aGate.wait()
+                    _ = await aCompletions.increment()
+                    return historyPayload(
+                        sessionKey: "a",
+                        sessionId: "session-a",
+                        messages: [chatTextMessage(role: "assistant", text: "from a", timestamp: 1)])
+                case "b":
+                    _ = await bRequests.increment()
+                    await bGate.wait()
+                    return historyPayload(
+                        sessionKey: "b",
+                        sessionId: "session-b",
+                        messages: [chatTextMessage(role: "assistant", text: "from b", timestamp: 2)])
+                default:
+                    return historyPayload(sessionKey: sessionKey)
+                }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+
+        await MainActor.run { vm.switchSession(to: "a") }
+        try await waitUntil("session a history requested") { await aRequests.current() == 1 }
+
+        await MainActor.run { vm.switchSession(to: "b") }
+        try await waitUntil("session b history requested") { await bRequests.current() == 1 }
+        #expect(await MainActor.run { vm.sessionKey == "b" && vm.isLoading })
+
+        await aGate.open()
+        try await waitUntil("stale session a response completed") { await aCompletions.current() == 1 }
+        #expect(await MainActor.run {
+            vm.sessionKey == "b" && vm.sessionId != "session-a" && vm.messages.isEmpty && vm.isLoading
+        })
+
+        await bGate.open()
+        try await waitUntil("session b committed") {
+            await MainActor.run { vm.sessionId == "session-b" && !vm.isLoading }
+        }
+        #expect(await MainActor.run {
+            vm.messages.first?.content.compactMap(\.text).joined() == "from b"
+        })
+    }
+
     @Test func streamsAssistantAndClearsOnFinal() async throws {
         let sessionId = "sess-main"
         let history1 = historyPayload(sessionId: sessionId)
