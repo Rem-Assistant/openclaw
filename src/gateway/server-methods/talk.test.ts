@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   canonicalizeSpeechProviderId: vi.fn((providerId: string | undefined) => providerId),
   getSpeechProvider: vi.fn(),
   listSpeechProviders: vi.fn(() => []),
+  listSpeechVoices: vi.fn(),
   getResolvedSpeechProviderConfig: vi.fn(() => ({})),
   resolveTtsConfig: vi.fn(() => ({ timeoutMs: 30_000 })),
   synthesizeSpeech: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("../../tts/provider-registry.js", () => ({
 
 vi.mock("../../tts/tts.js", () => ({
   getResolvedSpeechProviderConfig: mocks.getResolvedSpeechProviderConfig,
+  listSpeechVoices: mocks.listSpeechVoices,
   resolveTtsConfig: mocks.resolveTtsConfig,
   synthesizeSpeech: mocks.synthesizeSpeech,
 }));
@@ -288,6 +290,87 @@ describe("talk.catalog handler", () => {
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("speech-key");
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("stt-key");
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("live-key");
+  });
+});
+
+describe("talk.voices handler", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns dynamic active-provider voices without provider credentials", async () => {
+    const runtimeConfig = createTalkConfig("secret-elevenlabs-key");
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    });
+    mocks.listSpeechVoices.mockImplementation(
+      async ({ provider, cfg }: { provider: string; cfg: OpenClawConfig }) => {
+        expect(provider).toBe("acme");
+        expect(cfg.messages?.tts?.providers?.acme?.apiKey).toBe("secret-elevenlabs-key");
+        return [
+          {
+            id: "voice-a",
+            name: "Claudia",
+            category: "premade",
+            description: "Warm and clear",
+            locale: "en-US",
+            gender: "female",
+            personalities: ["warm"],
+          },
+        ];
+      },
+    );
+
+    const respond = vi.fn();
+    await talkHandlers["talk.voices"]({
+      req: { type: "req", id: "voices-1", method: "talk.voices" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      {
+        provider: "acme",
+        voices: [
+          {
+            id: "voice-a",
+            name: "Claudia",
+            category: "premade",
+            description: "Warm and clear",
+            locale: "en-US",
+            gender: "female",
+            personalities: ["warm"],
+          },
+        ],
+      },
+      undefined,
+    );
+    expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("secret-elevenlabs-key");
+  });
+
+  it("surfaces an unavailable error when Talk has no active speech provider", async () => {
+    const respond = vi.fn();
+    await talkHandlers["talk.voices"]({
+      req: { type: "req", id: "voices-2", method: "talk.voices" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => ({}) as OpenClawConfig } as never,
+    });
+
+    expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    expect(mocks.listSpeechVoices).not.toHaveBeenCalled();
   });
 });
 

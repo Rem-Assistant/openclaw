@@ -24,6 +24,7 @@ import {
 } from "../../tts/provider-registry.js";
 import {
   getResolvedSpeechProviderConfig,
+  listSpeechVoices,
   resolveTtsConfig,
   synthesizeSpeech,
   type TtsDirectiveOverrides,
@@ -38,6 +39,7 @@ import {
   validateTalkConfigParams,
   validateTalkModeParams,
   validateTalkSpeakParams,
+  validateTalkVoicesParams,
 } from "../protocol/index.js";
 import { formatForLog } from "../ws-log.js";
 import { asRecord } from "./record-shared.js";
@@ -496,6 +498,47 @@ export const talkHandlers: GatewayRequestHandlers = {
 
     try {
       respond(true, buildTalkCatalog(context.getRuntimeConfig()), undefined);
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
+    }
+  },
+  "talk.voices": async ({ params, respond, context }) => {
+    const voicesParams = params ?? {};
+    if (!validateTalkVoicesParams(voicesParams)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.voices params: ${formatValidationErrors(validateTalkVoicesParams.errors)}`,
+        ),
+      );
+      return;
+    }
+
+    try {
+      const setup = buildTalkTtsConfig(context.getRuntimeConfig());
+      if ("error" in setup) {
+        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, setup.error));
+        return;
+      }
+      const voices = await listSpeechVoices({ provider: setup.provider, cfg: setup.cfg });
+      respond(
+        true,
+        {
+          provider: setup.provider,
+          voices: voices.map((voice) => ({
+            id: voice.id,
+            ...(voice.name == null ? {} : { name: voice.name }),
+            ...(voice.category == null ? {} : { category: voice.category }),
+            ...(voice.description == null ? {} : { description: voice.description }),
+            ...(voice.locale == null ? {} : { locale: voice.locale }),
+            ...(voice.gender == null ? {} : { gender: voice.gender }),
+            ...(voice.personalities == null ? {} : { personalities: voice.personalities }),
+          })),
+        },
+        undefined,
+      );
     } catch (err) {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
     }

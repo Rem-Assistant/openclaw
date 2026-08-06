@@ -67,6 +67,10 @@ import {
   TalkCatalogParamsSchema,
   type TalkCatalogResult,
   TalkCatalogResultSchema,
+  type TalkVoicesParams,
+  TalkVoicesParamsSchema,
+  type TalkVoicesResult,
+  TalkVoicesResultSchema,
   type TalkClientCreateParams,
   TalkClientCreateParamsSchema,
   type TalkClientCreateResult,
@@ -588,6 +592,8 @@ export const validateTalkModeParams = ajv.compile<TalkModeParams>(TalkModeParams
 export const validateTalkEvent = ajv.compile<TalkEvent>(TalkEventSchema);
 export const validateTalkCatalogParams = ajv.compile<TalkCatalogParams>(TalkCatalogParamsSchema);
 export const validateTalkCatalogResult = ajv.compile<TalkCatalogResult>(TalkCatalogResultSchema);
+export const validateTalkVoicesParams = ajv.compile<TalkVoicesParams>(TalkVoicesParamsSchema);
+export const validateTalkVoicesResult = ajv.compile<TalkVoicesResult>(TalkVoicesResultSchema);
 export const validateTalkConfigParams = ajv.compile<TalkConfigParams>(TalkConfigParamsSchema);
 export const validateTalkConfigResult = ajv.compile<TalkConfigResult>(TalkConfigResultSchema);
 export const validateTalkClientCreateParams = ajv.compile<TalkClientCreateParams>(
@@ -875,6 +881,8 @@ export {
   TalkEventSchema,
   TalkCatalogParamsSchema,
   TalkCatalogResultSchema,
+  TalkVoicesParamsSchema,
+  TalkVoicesResultSchema,
   TalkClientCreateParamsSchema,
   TalkClientCreateResultSchema,
   TalkClientToolCallParamsSchema,
@@ -1007,6 +1015,8 @@ export type {
   WizardStatusResult,
   TalkCatalogParams,
   TalkCatalogResult,
+  TalkVoicesParams,
+  TalkVoicesResult,
   TalkClientCreateParams,
   TalkClientCreateResult,
   TalkClientToolCallParams,
