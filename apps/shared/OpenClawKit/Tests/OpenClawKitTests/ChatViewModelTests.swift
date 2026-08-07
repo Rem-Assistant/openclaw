@@ -1696,6 +1696,7 @@ extension TestChatTransportState {
             await transport.sendPreparationPhases() == [.started]
         }
         await MainActor.run { vm.switchSession(to: "other") }
+        #expect(await MainActor.run { vm.sessionKey } == "main")
         await gate.open()
 
         try await waitUntil("old send completes while other session loads") {
@@ -1705,6 +1706,40 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.messages.allSatisfy { message in
             !message.content.contains { $0.text == "private to main" }
         } })
+    }
+
+    @Test func agentEventsAreIgnoredWhileDestinationSessionIdentityIsLoading() async throws {
+        let destinationGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [],
+            historyRequestHook: { sessionKey in
+                if sessionKey == "other" { await destinationGate.wait() }
+                return historyPayload(sessionKey: sessionKey, sessionId: "session-\(sessionKey)")
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "session-main")
+
+        await MainActor.run { vm.switchSession(to: "other") }
+        try await waitUntil("destination bootstrap clears session identity") {
+            await MainActor.run { vm.sessionKey == "other" && vm.isLoading && vm.sessionId == nil }
+        }
+        transport.emit(
+            .agent(
+                OpenClawAgentEventPayload(
+                    runId: "session-main",
+                    seq: 1,
+                    stream: "assistant",
+                    ts: Int(Date().timeIntervalSince1970 * 1000),
+                    data: ["text": AnyCodable("private old reply")])))
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(await MainActor.run { vm.streamingAssistantText } == nil)
+        #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
+
+        await destinationGate.open()
+        try await waitUntil("destination loads") { await MainActor.run { !vm.isLoading } }
     }
 
     @Test func abortWhilePreparationObserverIsSuspendedNeverSends() async throws {

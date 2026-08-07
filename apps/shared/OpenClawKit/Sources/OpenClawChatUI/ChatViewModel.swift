@@ -58,6 +58,7 @@ public final class OpenClawChatViewModel {
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
+    private var queuedSessionKeyAfterSend: String?
     private var sessionRefreshCount = 0
     private var nextSessionListRequestID: UInt64 = 0
     private var appliedSessionListRequestID: UInt64 = 0
@@ -173,6 +174,17 @@ public final class OpenClawChatViewModel {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         guard next != self.sessionKey else { return }
+        // Once Send is accepted, finish preparation and transport acknowledgement against the
+        // captured conversation before changing the shared transcript. This prevents both silent
+        // message loss and old-run activity from appearing in the destination during bootstrap.
+        if self.isSending {
+            self.queuedSessionKeyAfterSend = next
+            return
+        }
+        self.performSessionSwitch(to: next)
+    }
+
+    private func performSessionSwitch(to next: String) {
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
@@ -657,6 +669,7 @@ public final class OpenClawChatViewModel {
         let attachments = self.attachments
         let sessionRequest = self.currentSessionRequest()
         let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        var sendWasAccepted = false
         self.isSending = true
         self.errorText = nil
         let runId = UUID().uuidString
@@ -674,6 +687,12 @@ public final class OpenClawChatViewModel {
         defer {
             self.preparingRuns.remove(runId)
             self.isSending = false
+            if let queuedSessionKey = self.queuedSessionKeyAfterSend {
+                self.queuedSessionKeyAfterSend = nil
+                if sendWasAccepted {
+                    self.performSessionSwitch(to: queuedSessionKey)
+                }
+            }
         }
 
         // Append without awaiting diagnostics so clearing the composer always has immediate,
@@ -762,6 +781,7 @@ public final class OpenClawChatViewModel {
                 thinking: thinkingLevel,
                 idempotencyKey: runId,
                 attachments: encodedAttachments)
+            sendWasAccepted = true
             if response.runId != runId {
                 self.clearPendingRun(runId)
                 self.pendingRuns.insert(response.runId)
@@ -1470,7 +1490,10 @@ public final class OpenClawChatViewModel {
     }
 
     private func handleAgentEvent(_ evt: OpenClawAgentEventPayload) {
-        if let sessionId, evt.runId != sessionId {
+        // During a session bootstrap there is no authoritative run identity for the destination.
+        // Reject rather than letting a finishing run from the previous conversation populate it.
+        guard let sessionId else { return }
+        if evt.runId != sessionId {
             return
         }
 
