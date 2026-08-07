@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderHttpError } from "../../agents/provider-http-errors.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -5,6 +7,10 @@ import { normalizeResolvedSecretInputString } from "../../config/types.secrets.j
 import { ErrorCodes } from "../protocol/index.js";
 import { resetTalkSpeechCancellationForTests } from "../talk-speech-cancellation.js";
 import { talkHandlers } from "./talk.js";
+
+const canonicalMp3Fixture = readFileSync(
+  fileURLToPath(new URL("../../../test/fixtures/talk-canonical.mp3", import.meta.url)),
+);
 
 const mocks = vi.hoisted(() => ({
   getRuntimeConfig: vi.fn<() => OpenClawConfig>(),
@@ -481,7 +487,7 @@ describe("talk.speak handler", () => {
         return {
           success: true,
           provider: "acme",
-          audioBuffer: Buffer.from("ID3canonical-mp3"),
+          audioBuffer: canonicalMp3Fixture,
           outputFormat: "mp3",
           voiceCompatible: false,
           fileExtension: ".mp3",
@@ -507,7 +513,7 @@ describe("talk.speak handler", () => {
     });
     expectRespondOk(respond, {
       provider: "acme",
-      audioBase64: Buffer.from("ID3canonical-mp3").toString("base64"),
+      audioBase64: canonicalMp3Fixture.toString("base64"),
       outputFormat: "mp3",
       mimeType: "audio/mpeg",
       fileExtension: ".mp3",

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   invokeTalkSpeakDirect,
@@ -5,7 +7,9 @@ import {
   withSpeechProviders,
 } from "./talk.test-helpers.js";
 
-const canonicalMp3Fixture = Buffer.from("ID3canonical-mp3");
+const canonicalMp3Fixture = readFileSync(
+  fileURLToPath(new URL("../../test/fixtures/talk-canonical.mp3", import.meta.url)),
+);
 
 const synthesizeSpeechMock = vi.hoisted(() =>
   vi.fn<typeof import("../tts/tts.js").synthesizeSpeech>(async () => ({
