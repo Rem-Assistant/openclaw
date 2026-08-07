@@ -240,6 +240,25 @@ export function deriveSessionTitle(
   return undefined;
 }
 
+/**
+ * Enriched list rows must not turn an empty, materialized session into a
+ * conversation by exposing deriveSessionTitle's technical session-id fallback.
+ * Preserve explicit labels/subjects and transcript-backed first-message titles.
+ */
+function deriveConversationTitle(
+  entry: SessionEntry | undefined,
+  firstUserMessage?: string | null,
+): string | undefined {
+  if (
+    !normalizeOptionalString(entry?.displayName) &&
+    !normalizeOptionalString(entry?.subject) &&
+    !firstUserMessage?.trim()
+  ) {
+    return undefined;
+  }
+  return deriveSessionTitle(entry, firstUserMessage);
+}
+
 function resolveSessionRuntimeMs(
   run: { startedAt?: number; endedAt?: number; accumulatedRuntimeMs?: number } | null,
   now: number,
@@ -1767,7 +1786,7 @@ export function buildGatewaySessionRow(params: {
       sessionAgentId,
     );
     if (params.includeDerivedTitles) {
-      derivedTitle = deriveSessionTitle(entry, fields.firstUserMessage);
+      derivedTitle = deriveConversationTitle(entry, fields.firstUserMessage);
     }
     if (params.includeLastMessage && fields.lastMessagePreview) {
       lastMessagePreview = fields.lastMessagePreview;
@@ -1905,6 +1924,7 @@ export function loadGatewaySessionRow(
  * avoiding excessive yielding overhead for small stores.
  */
 const SESSIONS_LIST_YIELD_BATCH_SIZE = 10;
+const SESSIONS_LIST_TRANSCRIPT_CONCURRENCY = 8;
 const SESSIONS_LIST_TOP_N_LIMIT = 200;
 const SESSIONS_LIST_DEFAULT_LIMIT = 100;
 
@@ -1913,6 +1933,7 @@ type SessionEntrySelection = {
   entries: SessionEntryPair[];
   totalCount: number;
   limitApplied?: number;
+  offsetApplied: number;
 };
 
 function compareSessionEntryPairsByUpdatedAt(a: SessionEntryPair, b: SessionEntryPair): number {
@@ -1927,6 +1948,15 @@ function resolveSessionsListLimit(
     return defaultLimit;
   }
   return Math.max(1, Math.floor(opts.limit));
+}
+
+function resolveSessionsListOffset(
+  opts: import("./protocol/index.js").SessionsListParams,
+): number {
+  if (typeof opts.offset !== "number" || !Number.isFinite(opts.offset)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(opts.offset));
 }
 
 function selectNewestLimitedEntries(
@@ -2071,11 +2101,14 @@ function selectSessionEntries(params: {
 }): SessionEntrySelection {
   const filtered = filterSessionEntries(params);
   const limit = resolveSessionsListLimit(params.opts, params.defaultLimit);
-  const entries = sortAndLimitSessionEntries(filtered, limit);
+  const offset = resolveSessionsListOffset(params.opts);
+  const selectionLimit = limit === undefined ? undefined : offset + limit;
+  const entries = sortAndLimitSessionEntries(filtered, selectionLimit).slice(offset);
   return {
     entries,
     totalCount: filtered.length,
     limitApplied: limit,
+    offsetApplied: offset,
   };
 }
 
@@ -2098,7 +2131,6 @@ export function listSessionsFromStore(params: {
   const { cfg, storePath, store, opts } = params;
   const now = Date.now();
   const sessionListTranscriptUsageMaxBytes = 64 * 1024;
-  const sessionListTranscriptFieldRows = 100;
   let rowContext: SessionListRowContext | undefined;
   const getRowContext = () => {
     rowContext ??= buildSessionListRowContext({ store, now });
@@ -2115,10 +2147,9 @@ export function listSessionsFromStore(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied } = selection;
+  const { entries, totalCount, limitApplied, offsetApplied } = selection;
 
-  const sessions = entries.map(([key, entry], index) => {
-    const includeTranscriptFields = index < sessionListTranscriptFieldRows;
+  const sessions = entries.map(([key, entry]) => {
     return buildGatewaySessionRow({
       cfg,
       storePath,
@@ -2127,8 +2158,8 @@ export function listSessionsFromStore(params: {
       entry,
       modelCatalog: params.modelCatalog,
       now,
-      includeDerivedTitles: includeTranscriptFields && includeDerivedTitles,
-      includeLastMessage: includeTranscriptFields && includeLastMessage,
+      includeDerivedTitles,
+      includeLastMessage,
       transcriptUsageMaxBytes: sessionListTranscriptUsageMaxBytes,
       storeChildSessionsByKey: getRowContext().storeChildSessionsByKey,
       rowContext: getRowContext(),
@@ -2141,7 +2172,7 @@ export function listSessionsFromStore(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: sessions.length < totalCount,
+    hasMore: offsetApplied + sessions.length < totalCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };
@@ -2167,7 +2198,6 @@ export async function listSessionsFromStoreAsync(params: {
   const { cfg, storePath, store, opts } = params;
   const now = Date.now();
   const sessionListTranscriptUsageMaxBytes = 64 * 1024;
-  const sessionListTranscriptFieldRows = 100;
   let rowContext: SessionListRowContext | undefined;
   const getRowContext = () => {
     rowContext ??= buildSessionListRowContext({ store, now });
@@ -2184,57 +2214,61 @@ export async function listSessionsFromStoreAsync(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied } = selection;
+  const { entries, totalCount, limitApplied, offsetApplied } = selection;
 
-  const sessions: GatewaySessionRow[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const [key, entry] = entries[i];
-    const includeTranscriptFields = i < sessionListTranscriptFieldRows;
-    const row = buildGatewaySessionRow({
-      cfg,
-      storePath,
-      store,
-      key,
-      entry,
-      modelCatalog: params.modelCatalog,
-      now,
-      includeDerivedTitles: false,
-      includeLastMessage: false,
-      transcriptUsageMaxBytes: sessionListTranscriptUsageMaxBytes,
-      storeChildSessionsByKey: getRowContext().storeChildSessionsByKey,
-      rowContext: getRowContext(),
-      skipTranscriptUsageFallback: true,
-      lightweightListRow: true,
-    });
-    if (
-      entry?.sessionId &&
-      includeTranscriptFields &&
-      (includeDerivedTitles || includeLastMessage)
-    ) {
-      const parsed = parseAgentSessionKey(key);
-      const sessionAgentId = parsed?.agentId
-        ? normalizeAgentId(parsed.agentId)
-        : resolveDefaultAgentId(cfg);
-      const fields = await readSessionTitleFieldsFromTranscriptAsync(
-        entry.sessionId,
+  const sessions = new Array<GatewaySessionRow>(entries.length);
+  let nextEntryIndex = 0;
+
+  const buildNextRows = async () => {
+    while (nextEntryIndex < entries.length) {
+      const i = nextEntryIndex;
+      nextEntryIndex += 1;
+      const [key, entry] = entries[i];
+      const row = buildGatewaySessionRow({
+        cfg,
         storePath,
-        entry.sessionFile,
-        sessionAgentId,
-      );
-      if (includeDerivedTitles) {
-        row.derivedTitle = deriveSessionTitle(entry, fields.firstUserMessage);
+        store,
+        key,
+        entry,
+        modelCatalog: params.modelCatalog,
+        now,
+        includeDerivedTitles: false,
+        includeLastMessage: false,
+        transcriptUsageMaxBytes: sessionListTranscriptUsageMaxBytes,
+        storeChildSessionsByKey: getRowContext().storeChildSessionsByKey,
+        rowContext: getRowContext(),
+        skipTranscriptUsageFallback: true,
+        lightweightListRow: true,
+      });
+      if (entry?.sessionId && (includeDerivedTitles || includeLastMessage)) {
+        const parsed = parseAgentSessionKey(key);
+        const sessionAgentId = parsed?.agentId
+          ? normalizeAgentId(parsed.agentId)
+          : resolveDefaultAgentId(cfg);
+        const fields = await readSessionTitleFieldsFromTranscriptAsync(
+          entry.sessionId,
+          storePath,
+          entry.sessionFile,
+          sessionAgentId,
+        );
+        if (includeDerivedTitles) {
+          row.derivedTitle = deriveConversationTitle(entry, fields.firstUserMessage);
+        }
+        if (includeLastMessage && fields.lastMessagePreview) {
+          row.lastMessagePreview = fields.lastMessagePreview;
+        }
       }
-      if (includeLastMessage && fields.lastMessagePreview) {
-        row.lastMessagePreview = fields.lastMessagePreview;
+      sessions[i] = row;
+      // Cached reads can resolve without filesystem I/O. Keep an explicit
+      // macrotask yield so large cached stores do not monopolize the gateway.
+      if ((i + 1) % SESSIONS_LIST_YIELD_BATCH_SIZE === 0 && i + 1 < entries.length) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
-    sessions.push(row);
-    // Yield to the event loop between batches so WebSocket heartbeats,
-    // channel I/O, and concurrent RPC calls are not starved.
-    if ((i + 1) % SESSIONS_LIST_YIELD_BATCH_SIZE === 0 && i + 1 < entries.length) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-  }
+  };
+
+  const workerCount = Math.min(SESSIONS_LIST_TRANSCRIPT_CONCURRENCY, entries.length);
+  await Promise.all(Array.from({ length: workerCount }, () => buildNextRows()));
 
   return {
     ts: now,
@@ -2242,7 +2276,7 @@ export async function listSessionsFromStoreAsync(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: sessions.length < totalCount,
+    hasMore: offsetApplied + sessions.length < totalCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };
