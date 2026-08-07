@@ -180,7 +180,9 @@ async function runCli(params: {
   outputDir: string;
   filePrefix: string;
   outputFormat?: OutputFormat;
+  signal?: AbortSignal;
 }): Promise<{ buffer: Buffer; actualFormat: "mp3" | "opus" | "wav"; audioPath?: string }> {
+  params.signal?.throwIfAborted();
   const cleanText = stripEmojis(params.text);
   if (!cleanText) {
     throw new Error("CLI TTS: text is empty after removing emojis");
@@ -204,6 +206,28 @@ async function runCli(params: {
 
   return new Promise((resolve, reject) => {
     let timedOut = false;
+    let aborted = false;
+    let settled = false;
+    const finishReject = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const finishResolve = (value: {
+      buffer: Buffer;
+      actualFormat: "mp3" | "opus" | "wav";
+      audioPath?: string;
+    }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill();
@@ -213,6 +237,16 @@ async function runCli(params: {
 
     const env = params.env ? { ...process.env, ...params.env } : process.env;
     const proc = spawn(cmd, args, { cwd: params.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const onAbort = () => {
+      aborted = true;
+      proc.kill();
+      setTimeout(() => proc.kill("SIGKILL"), 5000).unref();
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      params.signal?.removeEventListener("abort", onAbort);
+    };
+    params.signal?.addEventListener("abort", onAbort, { once: true });
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -220,30 +254,31 @@ async function runCli(params: {
     proc.stderr.on("data", (c) => stderrChunks.push(c));
 
     proc.on("error", (e) => {
-      clearTimeout(timer);
-      reject(new Error(`CLI TTS failed: ${e.message}`));
+      finishReject(new Error(`CLI TTS failed: ${e.message}`));
     });
 
     proc.on("close", (code) => {
-      clearTimeout(timer);
+      if (aborted) {
+        return finishReject(params.signal?.reason ?? new DOMException("Aborted", "AbortError"));
+      }
       if (timedOut) {
-        return reject(new Error(`CLI TTS timed out after ${params.timeoutMs}ms`));
+        return finishReject(new Error(`CLI TTS timed out after ${params.timeoutMs}ms`));
       }
       if (code !== 0) {
         const stderr = Buffer.concat(stderrChunks).toString("utf8");
-        return reject(new Error(`CLI TTS exit ${code}: ${stderr}`));
+        return finishReject(new Error(`CLI TTS exit ${code}: ${stderr}`));
       }
 
       const audioFile = findAudioFile(params.outputDir, params.filePrefix);
       if (audioFile) {
         if (!existsSync(audioFile)) {
-          return reject(new Error(`CLI TTS: output file not found at ${audioFile}`));
+          return finishReject(new Error(`CLI TTS: output file not found at ${audioFile}`));
         }
         const format = detectFormat(audioFile);
         if (!format) {
-          return reject(new Error(`CLI TTS: unknown format for ${audioFile}`));
+          return finishReject(new Error(`CLI TTS: unknown format for ${audioFile}`));
         }
-        return resolve({
+        return finishResolve({
           buffer: readFileSync(audioFile),
           actualFormat: format,
           audioPath: audioFile,
@@ -253,9 +288,9 @@ async function runCli(params: {
       const stdout = Buffer.concat(stdoutChunks);
       if (stdout.length > 0) {
         // Assume WAV for stdout output; could be MP3 but caller should convert if needed
-        return resolve({ buffer: stdout, actualFormat: "wav" });
+        return finishResolve({ buffer: stdout, actualFormat: "wav" });
       }
-      reject(new Error("CLI TTS produced no output"));
+      finishReject(new Error("CLI TTS produced no output"));
     });
 
     proc.stdin?.on("error", () => {}); // suppress EPIPE if child ignores stdin
@@ -270,6 +305,7 @@ async function convertAudio(
   inputPath: string,
   outputDir: string,
   target: OutputFormat,
+  signal?: AbortSignal,
 ): Promise<Buffer> {
   const outputFileName = `converted${getFileExt(target)}`;
   const outputPath = path.join(outputDir, outputFileName);
@@ -285,13 +321,17 @@ async function convertAudio(
     rootDir: outputDir,
     path: outputFileName,
     write: async (tempPath) => {
-      await runFfmpeg([...args, tempPath]);
+      await runFfmpeg([...args, tempPath], { signal });
     },
   });
   return readFileSync(outputPath);
 }
 
-async function convertToRawPcm(inputPath: string, outputDir: string): Promise<Buffer> {
+async function convertToRawPcm(
+  inputPath: string,
+  outputDir: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
   // Output raw 16kHz mono 16-bit little-endian PCM (no WAV headers)
   const outputFileName = "telephony.pcm";
   const outputPath = path.join(outputDir, outputFileName);
@@ -299,20 +339,23 @@ async function convertToRawPcm(inputPath: string, outputDir: string): Promise<Bu
     rootDir: outputDir,
     path: outputFileName,
     write: async (tempPath) => {
-      await runFfmpeg([
-        "-y",
-        "-i",
-        inputPath,
-        "-c:a",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-f",
-        "s16le",
-        tempPath,
-      ]);
+      await runFfmpeg(
+        [
+          "-y",
+          "-i",
+          inputPath,
+          "-c:a",
+          "pcm_s16le",
+          "-ar",
+          "16000",
+          "-ac",
+          "1",
+          "-f",
+          "s16le",
+          tempPath,
+        ],
+        { signal },
+      );
     },
   });
   return readFileSync(outputPath);
@@ -358,6 +401,7 @@ export function buildCliSpeechProvider(): SpeechProviderPlugin {
           outputDir: tempDir,
           filePrefix: "speech",
           outputFormat: config.outputFormat,
+          signal: req.signal,
         });
 
         log.debug(`synthesize: format=${result.actualFormat}, size=${result.buffer.length}`);
@@ -372,7 +416,7 @@ export function buildCliSpeechProvider(): SpeechProviderPlugin {
             if (!result.audioPath) {
               await temp.write(`input${getFileExt(result.actualFormat)}`, result.buffer);
             }
-            buffer = await convertAudio(inputFile, tempDir, "opus");
+            buffer = await convertAudio(inputFile, tempDir, "opus", req.signal);
             format = "opus";
           } else {
             buffer = result.buffer;
@@ -386,7 +430,7 @@ export function buildCliSpeechProvider(): SpeechProviderPlugin {
             if (!result.audioPath) {
               await temp.write(`input${getFileExt(result.actualFormat)}`, result.buffer);
             }
-            buffer = await convertAudio(inputFile, tempDir, desired);
+            buffer = await convertAudio(inputFile, tempDir, desired, req.signal);
             format = desired;
           } else {
             buffer = result.buffer;

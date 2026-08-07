@@ -32,17 +32,26 @@ async function waitForEdgeTtsResult(params: {
     return;
   }
   signal.throwIfAborted();
-  let onAbort: (() => void) | undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
+  let wasAborted = false;
+  const onAbort = () => {
+    wasAborted = true;
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
   try {
-    await Promise.race([params.promise, aborted]);
-  } finally {
-    if (onAbort) {
-      signal.removeEventListener("abort", onAbort);
+    // node-edge-tts exposes no cancellation handle. Do not race away and let
+    // the caller delete its workspace while the dependency is still writing.
+    // Wait for the provider to settle, then surface the caller's cancellation.
+    await params.promise;
+  } catch (error) {
+    if (wasAborted) {
+      throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+  if (wasAborted) {
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
   }
 }
 

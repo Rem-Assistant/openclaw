@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -62,6 +62,7 @@ async function synthesize(params: {
   providerConfig: SpeechProviderConfig;
   text?: string;
   target?: SpeechSynthesisTarget;
+  signal?: AbortSignal;
 }) {
   return await buildCliSpeechProvider().synthesize({
     text: params.text ?? "hello world",
@@ -70,6 +71,7 @@ async function synthesize(params: {
     providerOverrides: {},
     timeoutMs: 1000,
     target: params.target ?? "audio-file",
+    signal: params.signal,
   });
 }
 
@@ -181,6 +183,40 @@ describe("buildCliSpeechProvider", () => {
       const audioPayload = parseAudioPayload(result);
       expect(audioPayload.stdin).toBe("");
       expect(audioPayload.textArg).toBe("spoken words");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("kills an active CLI synthesis when the request is cancelled", async () => {
+    const fixture = createCliFixture();
+    const marker = path.join(fixture.dir, "terminated.txt");
+    writeFileSync(
+      fixture.script,
+      `
+import { writeFileSync } from "node:fs";
+const marker = process.argv[2];
+process.on("SIGTERM", () => {
+  writeFileSync(marker, "terminated");
+  process.exit(143);
+});
+setInterval(() => {}, 1000);
+`,
+    );
+    const controller = new AbortController();
+    try {
+      const pending = synthesize({
+        providerConfig: baseProviderConfig(fixture.script, {
+          args: [fixture.script, marker],
+          timeoutMs: 10_000,
+        }),
+        signal: controller.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(existsSync(marker)).toBe(true);
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }

@@ -191,14 +191,18 @@ describe("edgeTTS empty audio validation", () => {
     expect(calls).toEqual(["Hello"]);
   });
 
-  it("rejects an in-flight synthesis when the caller cancels", async () => {
+  it("defers cancellation until the non-cancellable provider stops writing", async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), "tts-test-"));
     const outputPath = path.join(tempDir, "voice.mp3");
     const controller = new AbortController();
     const calls: string[] = [];
-    const deps = createEdgeTTSDeps(async (text: string) => {
+    let finishProvider: (() => void) | undefined;
+    const deps = createEdgeTTSDeps(async (text: string, filePath: string) => {
       calls.push(text);
-      return await new Promise<void>(() => {});
+      await new Promise<void>((resolve) => {
+        finishProvider = resolve;
+      });
+      writeFileSync(filePath, Buffer.from([0xff]));
     });
 
     const pending = edgeTTS(
@@ -213,6 +217,7 @@ describe("edgeTTS empty audio validation", () => {
     );
     await vi.waitFor(() => expect(calls).toEqual(["Hello"]));
     controller.abort(new Error("preview cancelled"));
+    finishProvider?.();
 
     await expect(pending).rejects.toThrow("preview cancelled");
     expect(calls).toEqual(["Hello"]);

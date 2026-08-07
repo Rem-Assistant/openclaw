@@ -14,6 +14,7 @@ export type MediaExecOptions = {
   timeoutMs?: number;
   maxBufferBytes?: number;
   input?: Buffer | string;
+  signal?: AbortSignal;
 };
 
 function resolveExecOptions(
@@ -23,6 +24,7 @@ function resolveExecOptions(
   return {
     timeout: options?.timeoutMs ?? defaultTimeoutMs,
     maxBuffer: options?.maxBufferBytes ?? MEDIA_FFMPEG_MAX_BUFFER_BYTES,
+    signal: options?.signal,
   };
 }
 
