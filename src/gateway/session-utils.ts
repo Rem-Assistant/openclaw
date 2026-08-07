@@ -1933,6 +1933,7 @@ type SessionEntrySelection = {
   entries: SessionEntryPair[];
   totalCount: number;
   limitApplied?: number;
+  offsetApplied: number;
 };
 
 function compareSessionEntryPairsByUpdatedAt(a: SessionEntryPair, b: SessionEntryPair): number {
@@ -1947,6 +1948,15 @@ function resolveSessionsListLimit(
     return defaultLimit;
   }
   return Math.max(1, Math.floor(opts.limit));
+}
+
+function resolveSessionsListOffset(
+  opts: import("./protocol/index.js").SessionsListParams,
+): number {
+  if (typeof opts.offset !== "number" || !Number.isFinite(opts.offset)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(opts.offset));
 }
 
 function selectNewestLimitedEntries(
@@ -2091,11 +2101,14 @@ function selectSessionEntries(params: {
 }): SessionEntrySelection {
   const filtered = filterSessionEntries(params);
   const limit = resolveSessionsListLimit(params.opts, params.defaultLimit);
-  const entries = sortAndLimitSessionEntries(filtered, limit);
+  const offset = resolveSessionsListOffset(params.opts);
+  const selectionLimit = limit === undefined ? undefined : offset + limit;
+  const entries = sortAndLimitSessionEntries(filtered, selectionLimit).slice(offset);
   return {
     entries,
     totalCount: filtered.length,
     limitApplied: limit,
+    offsetApplied: offset,
   };
 }
 
@@ -2134,7 +2147,7 @@ export function listSessionsFromStore(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied } = selection;
+  const { entries, totalCount, limitApplied, offsetApplied } = selection;
 
   const sessions = entries.map(([key, entry]) => {
     return buildGatewaySessionRow({
@@ -2159,7 +2172,7 @@ export function listSessionsFromStore(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: sessions.length < totalCount,
+    hasMore: offsetApplied + sessions.length < totalCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };
@@ -2201,7 +2214,7 @@ export async function listSessionsFromStoreAsync(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied } = selection;
+  const { entries, totalCount, limitApplied, offsetApplied } = selection;
 
   const sessions = new Array<GatewaySessionRow>(entries.length);
   let nextEntryIndex = 0;
@@ -2263,7 +2276,7 @@ export async function listSessionsFromStoreAsync(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: sessions.length < totalCount,
+    hasMore: offsetApplied + sessions.length < totalCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };

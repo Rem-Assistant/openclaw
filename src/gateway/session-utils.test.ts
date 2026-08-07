@@ -1394,6 +1394,49 @@ describe("listSessionsFromStore selected model display", () => {
     }
   });
 
+  test("hydrates a bounded offset page while preserving global totals", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-offset-"));
+    try {
+      const storePath = path.join(tmpDir, "sessions.json");
+      const store: Record<string, SessionEntry> = {};
+      const now = Date.now();
+      for (let i = 0; i < 12; i += 1) {
+        const sessionId = `paged-${i}`;
+        store[`agent:main:${sessionId}`] = {
+          sessionId,
+          updatedAt: now - i,
+        } as SessionEntry;
+        fs.writeFileSync(
+          path.join(tmpDir, `${sessionId}.jsonl`),
+          [
+            JSON.stringify({ type: "session", version: 1, id: sessionId }),
+            JSON.stringify({ message: { role: "user", content: `title ${i}` } }),
+            JSON.stringify({ message: { role: "assistant", content: `last ${i}` } }),
+          ].join("\n"),
+          "utf-8",
+        );
+      }
+
+      const result = await listSessionsFromStoreAsync({
+        cfg: createModelDefaultsConfig({ primary: "openai/gpt-5.4" }),
+        storePath,
+        store,
+        opts: { includeDerivedTitles: true, includeLastMessage: true, offset: 5, limit: 3 },
+      });
+
+      expect(result.totalCount).toBe(12);
+      expect(result.limitApplied).toBe(3);
+      expect(result.hasMore).toBe(true);
+      expect(result.sessions.map((row) => row.derivedTitle)).toEqual([
+        "title 5",
+        "title 6",
+        "title 7",
+      ]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("uses bounded top-N selection for small limited lists", () => {
     const now = Date.now();
     const store: Record<string, SessionEntry> = {
