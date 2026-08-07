@@ -260,6 +260,18 @@ private actor StringRecorder {
     }
 }
 
+private actor OptionalIntRecorder {
+    private var values: [Int?] = []
+
+    func append(_ value: Int?) {
+        self.values.append(value)
+    }
+
+    func snapshot() -> [Int?] {
+        self.values
+    }
+}
+
 private actor TestChatTransportState {
     var historyCallCount: Int = 0
     var sessionsCallCount: Int = 0
@@ -280,6 +292,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let setActiveSessionHook: (@Sendable (String) async throws -> Void)?
     private let requestHealthHook: (@Sendable () async throws -> Bool)?
     private let sessionsResponses: [OpenClawChatSessionsListResponse]
+    private let sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)?
     private let modelResponses: [[OpenClawChatModelChoice]]
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
@@ -295,6 +308,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         setActiveSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         requestHealthHook: (@Sendable () async throws -> Bool)? = nil,
         sessionsResponses: [OpenClawChatSessionsListResponse] = [],
+        sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)? = nil,
         modelResponses: [[OpenClawChatModelChoice]] = [],
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
@@ -306,6 +320,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.setActiveSessionHook = setActiveSessionHook
         self.requestHealthHook = requestHealthHook
         self.sessionsResponses = sessionsResponses
+        self.sessionsRequestHook = sessionsRequestHook
         self.modelResponses = modelResponses
         self.resetSessionHook = resetSessionHook
         self.compactSessionHook = compactSessionHook
@@ -358,7 +373,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         await self.state.abortedRunIdsAppend(runId)
     }
 
-    func listSessions(limit _: Int?) async throws -> OpenClawChatSessionsListResponse {
+    func listSessions(limit: Int?) async throws -> OpenClawChatSessionsListResponse {
+        if let sessionsRequestHook = self.sessionsRequestHook {
+            return try await sessionsRequestHook(limit)
+        }
         let idx = await self.state.sessionsCallCount
         await self.state.setSessionsCallCount(idx + 1)
         if idx < self.sessionsResponses.count {
@@ -2177,5 +2195,153 @@ Hello?
                     errorMessage: nil)))
 
         try await waitUntil("pending run clears") { await MainActor.run { vm.pendingRunCount == 0 } }
+    }
+
+    @Test func sessionsListDecodesPaginationMetadata() throws {
+        let payload = Data("""
+        {
+          "count": 100,
+          "totalCount": 245,
+          "limitApplied": 100,
+          "hasMore": true,
+          "sessions": []
+        }
+        """.utf8)
+
+        let response = try JSONDecoder().decode(
+            OpenClawChatSessionsListResponse.self,
+            from: payload)
+
+        #expect(response.count == 100)
+        #expect(response.totalCount == 245)
+        #expect(response.limitApplied == 100)
+        #expect(response.hasMore == true)
+    }
+
+    @Test func slowerSmallerSessionWindowCannotReplaceLargerWindow() async {
+        let transport = TestChatTransport(
+            historyResponses: [],
+            sessionsRequestHook: { limit in
+                if limit == 100 {
+                    try await Task.sleep(for: .milliseconds(100))
+                } else {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                return OpenClawChatSessionsListResponse(
+                    ts: nil,
+                    path: nil,
+                    count: limit,
+                    totalCount: limit,
+                    limitApplied: limit,
+                    hasMore: false,
+                    defaults: nil,
+                    sessions: [])
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+
+        async let smaller = vm.reloadSessions(limit: 100)
+        async let larger = vm.reloadSessions(limit: 200)
+        _ = await (smaller, larger)
+
+        #expect(await MainActor.run { vm.sessionsTotalCount } == 200)
+    }
+
+    @Test func sessionListFailureIsExposedToListSurfaces() async {
+        struct ExpectedFailure: LocalizedError {
+            var errorDescription: String? { "Could not load sessions" }
+        }
+        let transport = TestChatTransport(
+            historyResponses: [],
+            sessionsRequestHook: { _ in throw ExpectedFailure() })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+
+        let succeeded = await vm.reloadSessions(limit: 100)
+
+        #expect(!succeeded)
+        #expect(await MainActor.run { vm.sessionsLoadError } == "Could not load sessions")
+    }
+
+    @Test func chatBootstrapRefreshesMetadataWithoutRefetchingEstablishedSessionWindow() async throws {
+        let requestedLimits = OptionalIntRecorder()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sessionsRequestHook: { limit in
+                await requestedLimits.append(limit)
+                return OpenClawChatSessionsListResponse(
+                    ts: nil,
+                    path: nil,
+                    count: 0,
+                    totalCount: limit,
+                    limitApplied: limit,
+                    hasMore: false,
+                    defaults: nil,
+                    sessions: [])
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+
+        #expect(await vm.reloadSessions(limit: 200))
+        #expect(await MainActor.run { vm.sessionsLimitApplied } == 200)
+        await MainActor.run { vm.load() }
+
+        try await waitUntil("bootstrap refreshes bounded session metadata") {
+            let snapshot = await requestedLimits.snapshot()
+            return snapshot.count >= 2
+        }
+        #expect(await requestedLimits.snapshot() == [200, 50])
+        #expect(await MainActor.run { vm.sessionsTotalCount } == 200)
+    }
+
+    @Test func olderBoundedBootstrapCannotClearNewerPaginationFailure() async throws {
+        struct PaginationFailure: LocalizedError {
+            var errorDescription: String? { "Could not load the next conversations" }
+        }
+        let boundedBootstrapGate = AsyncGate()
+        let requestedLimits = OptionalIntRecorder()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sessionsRequestHook: { limit in
+                await requestedLimits.append(limit)
+                if limit == 50 {
+                    await boundedBootstrapGate.wait()
+                } else if limit == 200 {
+                    throw PaginationFailure()
+                }
+                return OpenClawChatSessionsListResponse(
+                    ts: nil,
+                    path: nil,
+                    count: 0,
+                    totalCount: 100,
+                    limitApplied: limit,
+                    hasMore: false,
+                    defaults: nil,
+                    sessions: [])
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+
+        #expect(await vm.reloadSessions(limit: 100))
+        await MainActor.run { vm.load() }
+        try await waitUntil("older bounded bootstrap starts") {
+            await requestedLimits.snapshot().contains(50)
+        }
+
+        #expect(!(await vm.reloadSessions(limit: 200)))
+        #expect(await MainActor.run { vm.sessionsLoadError }
+            == "Could not load the next conversations")
+
+        await boundedBootstrapGate.open()
+        try await waitUntil("older bounded bootstrap finishes") {
+            await MainActor.run { !vm.isRefreshingSessions }
+        }
+
+        #expect(await MainActor.run { vm.sessionsLoadError }
+            == "Could not load the next conversations")
     }
 }

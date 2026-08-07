@@ -37,6 +37,13 @@ public final class OpenClawChatViewModel {
     public private(set) var streamingAssistantText: String?
     public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
     public private(set) var sessions: [OpenClawChatSessionEntry] = []
+    public private(set) var isRefreshingSessions = false
+    public private(set) var sessionsHasMore: Bool?
+    public private(set) var sessionsTotalCount: Int?
+    /// Authoritative row window currently retained by this view model. A recreated Sessions
+    /// surface uses it to refresh/delete against the same window instead of regressing to 100.
+    public private(set) var sessionsLimitApplied: Int?
+    public private(set) var sessionsLoadError: String?
     private let transport: any OpenClawChatTransport
     private var sessionDefaults: OpenClawChatSessionsDefaults?
     private let prefersExplicitThinkingLevel: Bool
@@ -49,6 +56,14 @@ public final class OpenClawChatViewModel {
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
+    private var sessionRefreshCount = 0
+    private var nextSessionListRequestID: UInt64 = 0
+    private var appliedSessionListRequestID: UInt64 = 0
+    private var appliedSessionListLimit = 0
+    /// Freshness for session defaults and load-error state is independent from the row-window
+    /// watermark: an older bounded bootstrap may preserve rows, but it must not clear or replace
+    /// metadata/error state produced by a newer pagination request.
+    private var appliedSessionMetadataRequestID: UInt64 = 0
     private var confirmedActiveSessionKey: String?
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
@@ -136,6 +151,13 @@ public final class OpenClawChatViewModel {
 
     public func refreshSessions(limit: Int? = nil) {
         Task { await self.fetchSessions(limit: limit) }
+    }
+
+    /// Refreshes the session list and completes only after the gateway request finishes.
+    /// List surfaces use this to keep loading and pagination UI tied to real network work.
+    @discardableResult
+    public func reloadSessions(limit: Int? = nil) async -> Bool {
+        await self.fetchSessions(limit: limit)
     }
 
     public func switchSession(to sessionKey: String) {
@@ -359,7 +381,13 @@ public final class OpenClawChatViewModel {
             self.syncThinkingLevelOptions()
             await self.pollHealthIfNeeded(force: true, bootstrapRequest: request)
             guard self.isCurrentBootstrap(request) else { return }
-            await self.fetchSessions(limit: 50, bootstrapRequest: request)
+            // Chat bootstrap only needs bounded session defaults/model metadata. If Sessions has
+            // already established a wider history window, preserve those rows while applying the
+            // fresh metadata rather than coupling chat-opening latency to the user's list depth.
+            await self.fetchSessions(
+                limit: 50,
+                bootstrapRequest: request,
+                preserveLargerSessionWindow: true)
             guard self.isCurrentBootstrap(request) else { return }
             await self.fetchModels(bootstrapRequest: request)
             guard self.isCurrentBootstrap(request) else { return }
@@ -706,20 +734,64 @@ public final class OpenClawChatViewModel {
         }
     }
 
+    @discardableResult
     private func fetchSessions(
         limit: Int?,
-        bootstrapRequest: BootstrapRequest? = nil
-    ) async {
-        if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
+        bootstrapRequest: BootstrapRequest? = nil,
+        preserveLargerSessionWindow: Bool = false
+    ) async -> Bool {
+        if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return false }
+        self.nextSessionListRequestID &+= 1
+        let requestID = self.nextSessionListRequestID
+        // The gateway's omitted-limit contract is currently a 100-row window.
+        let requestLimit = limit ?? 100
+        self.sessionRefreshCount += 1
+        self.isRefreshingSessions = true
+        defer {
+            self.sessionRefreshCount = max(0, self.sessionRefreshCount - 1)
+            self.isRefreshingSessions = self.sessionRefreshCount > 0
+        }
         do {
             let res = try await self.transport.listSessions(limit: limit)
-            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
+            if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return false }
+            // A slower smaller request must never truncate a larger window that
+            // already completed. For equal windows, the newest request wins.
+            guard requestLimit > self.appliedSessionListLimit
+                    || (requestLimit == self.appliedSessionListLimit
+                        && requestID >= self.appliedSessionListRequestID)
+            else {
+                guard preserveLargerSessionWindow,
+                      requestLimit < self.appliedSessionListLimit
+                else { return false }
+                if requestID >= self.appliedSessionMetadataRequestID {
+                    self.appliedSessionMetadataRequestID = requestID
+                    self.sessionsLoadError = nil
+                    self.sessionDefaults = res.defaults
+                    self.syncSelectedModel()
+                    self.syncThinkingLevelOptions()
+                }
+                return true
+            }
+            self.appliedSessionListLimit = requestLimit
+            self.appliedSessionListRequestID = requestID
+            self.sessionsLimitApplied = res.limitApplied ?? requestLimit
             self.sessions = res.sessions
-            self.sessionDefaults = res.defaults
-            self.syncSelectedModel()
-            self.syncThinkingLevelOptions()
+            self.sessionsHasMore = res.hasMore
+            self.sessionsTotalCount = res.totalCount
+            if requestID >= self.appliedSessionMetadataRequestID {
+                self.appliedSessionMetadataRequestID = requestID
+                self.sessionsLoadError = nil
+                self.sessionDefaults = res.defaults
+                self.syncSelectedModel()
+                self.syncThinkingLevelOptions()
+            }
+            return true
         } catch {
-            // Best-effort.
+            if requestID >= self.appliedSessionMetadataRequestID {
+                self.appliedSessionMetadataRequestID = requestID
+                self.sessionsLoadError = error.localizedDescription
+            }
+            return false
         }
     }
 
