@@ -43,6 +43,7 @@ import {
   validateTalkSpeakParams,
   validateTalkVoicesParams,
 } from "../protocol/index.js";
+import { isCanonicalTalkMp3 } from "../talk-mp3-validation.js";
 import {
   beginTalkSpeech,
   cancelTalkSpeech,
@@ -385,13 +386,6 @@ function isMp3OutputFormat(outputFormat: string | undefined): boolean {
     normalized?.startsWith("mp3_") === true ||
     normalized?.endsWith("-mp3") === true
   );
-}
-
-function isLikelyMp3Audio(audio: Buffer): boolean {
-  if (audio.length >= 3 && audio.subarray(0, 3).toString("ascii") === "ID3") {
-    return true;
-  }
-  return audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xe0) === 0xe0;
 }
 
 function resolveTalkResponseFromConfig(params: {
@@ -758,7 +752,7 @@ export const talkHandlers: GatewayRequestHandlers = {
         );
         return;
       }
-      if (!isMp3OutputFormat(result.outputFormat) || !isLikelyMp3Audio(result.audioBuffer)) {
+      if (!isMp3OutputFormat(result.outputFormat) || !isCanonicalTalkMp3(result.audioBuffer)) {
         respond(
           false,
           undefined,
