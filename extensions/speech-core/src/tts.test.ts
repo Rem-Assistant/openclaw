@@ -594,6 +594,29 @@ describe("speech-core native voice-note routing", () => {
     expect(attempt).not.toHaveProperty("personaBinding");
   });
 
+  it("stops provider fallback when an external synthesis signal is aborted", async () => {
+    const controller = new AbortController();
+    const fallbackSynthesize = vi.fn(synthesizeMock);
+    installSpeechProviders([
+      createMockSpeechProvider("mock", {
+        synthesize: async () => {
+          controller.abort();
+          throw new DOMException("cancelled", "AbortError");
+        },
+      }),
+      createMockSpeechProvider("fallback", { synthesize: fallbackSynthesize }),
+    ]);
+
+    await expect(
+      synthesizeSpeech({
+        text: "Cancel this preview.",
+        cfg: createTtsConfig("openclaw-speech-core-cancel-test"),
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
   it("does not mark skipped telephony providers as missing persona bindings", async () => {
     const result = await textToSpeechTelephony({
       text: "Use telephony provider.",

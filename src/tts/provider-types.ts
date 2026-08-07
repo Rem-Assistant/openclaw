@@ -48,6 +48,7 @@ export type SpeechSynthesisRequest = {
   target: SpeechSynthesisTarget;
   providerOverrides?: SpeechProviderOverrides;
   timeoutMs: number;
+  signal?: AbortSignal;
 };
 
 export type SpeechSynthesisResult = {

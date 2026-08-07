@@ -72,6 +72,7 @@ const BASE_METHODS = [
   "talk.session.submitToolResult",
   "talk.session.close",
   "talk.speak",
+  "talk.speak.cancel",
   "talk.mode",
   "commands.list",
   "models.list",

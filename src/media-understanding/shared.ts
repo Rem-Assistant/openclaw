@@ -402,6 +402,7 @@ export async function postJsonRequest(params: {
   ssrfPolicy?: SsrFPolicy;
   dispatcherPolicy?: PinnedDispatcherPolicy;
   auditContext?: string;
+  signal?: AbortSignal;
   /**
    * Override the guarded-fetch mode. Defaults to an auto-upgrade to
    * `TRUSTED_ENV_PROXY` when `HTTP_PROXY`/`HTTPS_PROXY` is configured in the
@@ -415,6 +416,7 @@ export async function postJsonRequest(params: {
       method: "POST",
       headers: params.headers,
       body: JSON.stringify(params.body),
+      signal: params.signal,
     },
     params.timeoutMs,
     params.fetchFn,

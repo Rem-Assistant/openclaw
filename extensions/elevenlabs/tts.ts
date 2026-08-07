@@ -51,6 +51,7 @@ type ElevenLabsTtsRequestParams = {
     speed: number;
   };
   timeoutMs: number;
+  signal?: AbortSignal;
 };
 
 function prepareElevenLabsTtsRequest(params: ElevenLabsTtsRequestParams & { stream: boolean }): {
@@ -137,6 +138,7 @@ export async function elevenLabsTTS(params: ElevenLabsTtsRequestParams): Promise
       body,
     },
     timeoutMs,
+    signal: params.signal,
     policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(normalizedBaseUrl),
     auditContext: "elevenlabs.tts",
   });
@@ -171,6 +173,7 @@ export async function elevenLabsTTSStream(params: ElevenLabsTtsRequestParams): P
       body,
     },
     timeoutMs,
+    signal: params.signal,
     policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(normalizedBaseUrl),
     auditContext: "elevenlabs.tts.stream",
   });

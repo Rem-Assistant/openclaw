@@ -38,9 +38,15 @@ import {
   validateTalkCatalogParams,
   validateTalkConfigParams,
   validateTalkModeParams,
+  validateTalkSpeakCancelParams,
   validateTalkSpeakParams,
   validateTalkVoicesParams,
 } from "../protocol/index.js";
+import {
+  beginTalkSpeech,
+  cancelTalkSpeech,
+  finishTalkSpeech,
+} from "../talk-speech-cancellation.js";
 import { formatForLog } from "../ws-log.js";
 import { asRecord } from "./record-shared.js";
 import { talkClientHandlers } from "./talk-client.js";
@@ -591,7 +597,7 @@ export const talkHandlers: GatewayRequestHandlers = {
 
     respond(true, { config: configPayload }, undefined);
   },
-  "talk.speak": async ({ params, respond, context }) => {
+  "talk.speak": async ({ params, respond, context, client }) => {
     if (!validateTalkSpeakParams(params)) {
       respond(
         false,
@@ -627,6 +633,19 @@ export const talkHandlers: GatewayRequestHandlers = {
       return;
     }
 
+    const connectionId = typeof client?.connId === "string" ? client.connId : undefined;
+    const previewId = normalizeOptionalString(typedParams.previewId);
+    if (previewId && !connectionId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "talk.speak previewId requires a client connection"),
+      );
+      return;
+    }
+    const controller =
+      previewId && connectionId ? beginTalkSpeech(connectionId, previewId) : undefined;
+
     try {
       const runtimeConfig = context.getRuntimeConfig();
       const setup = buildTalkTtsConfig(runtimeConfig);
@@ -646,6 +665,7 @@ export const talkHandlers: GatewayRequestHandlers = {
         cfg: setup.cfg,
         overrides,
         disableFallback: true,
+        signal: controller?.signal,
       });
       if (!result.success || !result.audioBuffer) {
         respond(
@@ -685,8 +705,43 @@ export const talkHandlers: GatewayRequestHandlers = {
         undefined,
       );
     } catch (err) {
+      if (controller?.signal.aborted) {
+        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "talk synthesis cancelled"));
+        return;
+      }
       respond(false, undefined, talkSpeakError("synthesis_failed", formatForLog(err)));
+    } finally {
+      if (previewId && connectionId && controller) {
+        finishTalkSpeech(connectionId, previewId, controller);
+      }
     }
+  },
+  "talk.speak.cancel": ({ params, respond, client }) => {
+    if (!validateTalkSpeakCancelParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.speak.cancel params: ${formatValidationErrors(validateTalkSpeakCancelParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const connectionId = typeof client?.connId === "string" ? client.connId : undefined;
+    if (!connectionId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "talk.speak.cancel requires a client connection"),
+      );
+      return;
+    }
+    respond(
+      true,
+      { ok: true, cancelled: cancelTalkSpeech(connectionId, params.previewId) },
+      undefined,
+    );
   },
   "talk.mode": ({ params, respond, context, client, isWebchatConnect }) => {
     if (client && isWebchatConnect(client.connect) && !context.hasConnectedTalkNode()) {

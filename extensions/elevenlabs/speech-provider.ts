@@ -513,6 +513,7 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
         latencyTier,
         voiceSettings: resolveVoiceSettingsOverride(config.voiceSettings, overrides.voiceSettings),
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       return {
         audioBuffer,
@@ -551,6 +552,7 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
         latencyTier,
         voiceSettings: resolveVoiceSettingsOverride(config.voiceSettings, overrides.voiceSettings),
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       return {
         audioStream: stream.audioStream,
