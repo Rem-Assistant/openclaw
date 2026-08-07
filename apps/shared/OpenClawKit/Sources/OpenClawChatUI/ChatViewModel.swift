@@ -49,6 +49,7 @@ public final class OpenClawChatViewModel {
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
+    private var loadedSessionGeneration: UInt64?
     private var confirmedActiveSessionKey: String?
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
@@ -119,6 +120,11 @@ public final class OpenClawChatViewModel {
     }
 
     public func load() {
+        // View appearance is not a refresh command. The iOS destination, shared chat surface, and
+        // Mac host can all appear for the same long-lived model; coalesce those lifecycle calls and
+        // keep a warm transcript painted. `refresh()` remains the explicit forced-reload path.
+        guard self.loadedSessionGeneration != self.sessionGeneration else { return }
+        guard self.bootstrapTask == nil else { return }
         self.startBootstrap()
     }
 
@@ -127,7 +133,49 @@ public final class OpenClawChatViewModel {
     }
 
     public func send() {
-        Task { await self.performSend() }
+        guard !self.isSending else { return }
+        let trimmed = self.input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !self.attachments.isEmpty else { return }
+
+        if Self.resetTriggers.contains(trimmed.lowercased()) {
+            self.input = ""
+            Task { await self.performReset() }
+            return
+        }
+        if Self.compactTriggers.contains(trimmed.lowercased()) {
+            self.input = ""
+            Task { await self.performCompact() }
+            return
+        }
+        guard self.healthOK else {
+            self.errorText = "Gateway health not OK; cannot send"
+            return
+        }
+
+        let messageText = trimmed.isEmpty && !self.attachments.isEmpty ? "See attached." : trimmed
+        let encodedAttachments = self.attachments.map { attachment in
+            OpenClawChatAttachmentPayload(
+                type: attachment.type,
+                mimeType: attachment.mimeType,
+                fileName: attachment.fileName,
+                content: attachment.data.base64EncodedString())
+        }
+        let draft = PendingSend(
+            sessionKey: self.sessionKey,
+            runID: UUID().uuidString,
+            messageText: messageText,
+            thinkingLevel: self.thinkingLevel,
+            attachments: encodedAttachments)
+
+        // Own the TextField state synchronously in the same actor turn as the user's submit. The
+        // previous Task hop let SwiftUI's commit loop repaint the submitted draft before
+        // `performSend()` eventually cleared it.
+        self.input = ""
+        self.attachments = []
+        self.isSending = true
+        self.errorText = nil
+        self.beginOptimisticSend(draft)
+        Task { await self.performSend(draft) }
     }
 
     public func abort() {
@@ -144,6 +192,16 @@ public final class OpenClawChatViewModel {
         guard next != self.sessionKey else { return }
         self.sessionGeneration &+= 1
         self.sessionKey = next
+        self.loadedSessionGeneration = nil
+        // Session identity changes synchronously, so the pixels must change synchronously too.
+        // Never let the destination's first frame inherit transcript or composer state owned by
+        // the conversation being left.
+        self.messages = []
+        self.input = ""
+        self.attachments = []
+        self.streamingAssistantText = nil
+        self.pendingToolCallsById = [:]
+        self.sessionId = nil
         self.confirmedActiveSessionKey = nil
         self.modelSelectionID = Self.defaultModelSelectionID
         self.startBootstrap()
@@ -255,6 +313,14 @@ public final class OpenClawChatViewModel {
         var generation: UInt64
     }
 
+    private struct PendingSend {
+        var sessionKey: String
+        var runID: String
+        var messageText: String
+        var thinkingLevel: String
+        var attachments: [OpenClawChatAttachmentPayload]
+    }
+
     private func startBootstrap() {
         self.bootstrapTask?.cancel()
         self.nextBootstrapGeneration &+= 1
@@ -363,6 +429,7 @@ public final class OpenClawChatViewModel {
             guard self.isCurrentBootstrap(request) else { return }
             await self.fetchModels(bootstrapRequest: request)
             guard self.isCurrentBootstrap(request) else { return }
+            self.loadedSessionGeneration = request.sessionGeneration
             self.errorText = nil
         } catch {
             guard self.isCurrentBootstrap(request) else { return }
@@ -589,44 +656,16 @@ public final class OpenClawChatViewModel {
     private static let resetTriggers: Set<String> = ["/new", "/reset", "/clear"]
     private static let compactTriggers: Set<String> = ["/compact"]
 
-    private func performSend() async {
-        guard !self.isSending else { return }
-        let trimmed = self.input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !self.attachments.isEmpty else { return }
-
-        if Self.resetTriggers.contains(trimmed.lowercased()) {
-            self.input = ""
-            await self.performReset()
-            return
-        }
-        if Self.compactTriggers.contains(trimmed.lowercased()) {
-            self.input = ""
-            await self.performCompact()
-            return
-        }
-
-        let sessionKey = self.sessionKey
-
-        guard self.healthOK else {
-            self.errorText = "Gateway health not OK; cannot send"
-            return
-        }
-
-        self.isSending = true
-        self.errorText = nil
-        let runId = UUID().uuidString
-        let messageText = trimmed.isEmpty && !self.attachments.isEmpty ? "See attached." : trimmed
-        let thinkingLevel = self.thinkingLevel
-        self.pendingRuns.insert(runId)
-        self.armPendingRunTimeout(runId: runId)
+    private func beginOptimisticSend(_ draft: PendingSend) {
+        self.pendingRuns.insert(draft.runID)
+        self.armPendingRunTimeout(runId: draft.runID)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
 
-        // Optimistically append user message to UI.
         var userContent: [OpenClawChatMessageContent] = [
             OpenClawChatMessageContent(
                 type: "text",
-                text: messageText,
+                text: draft.messageText,
                 thinking: nil,
                 thinkingSignature: nil,
                 mimeType: nil,
@@ -636,14 +675,7 @@ public final class OpenClawChatViewModel {
                 name: nil,
                 arguments: nil),
         ]
-        let encodedAttachments = self.attachments.map { att -> OpenClawChatAttachmentPayload in
-            OpenClawChatAttachmentPayload(
-                type: att.type,
-                mimeType: att.mimeType,
-                fileName: att.fileName,
-                content: att.data.base64EncodedString())
-        }
-        for att in encodedAttachments {
+        for att in draft.attachments {
             userContent.append(
                 OpenClawChatMessageContent(
                     type: att.type,
@@ -663,26 +695,24 @@ public final class OpenClawChatViewModel {
                 role: "user",
                 content: userContent,
                 timestamp: Date().timeIntervalSince1970 * 1000))
+    }
 
-        // Clear input immediately for responsive UX (before network await)
-        self.input = ""
-        self.attachments = []
-
+    private func performSend(_ draft: PendingSend) async {
         do {
-            await self.waitForPendingModelPatches(in: sessionKey)
+            await self.waitForPendingModelPatches(in: draft.sessionKey)
             let response = try await self.transport.sendMessage(
-                sessionKey: sessionKey,
-                message: messageText,
-                thinking: thinkingLevel,
-                idempotencyKey: runId,
-                attachments: encodedAttachments)
-            if response.runId != runId {
-                self.clearPendingRun(runId)
+                sessionKey: draft.sessionKey,
+                message: draft.messageText,
+                thinking: draft.thinkingLevel,
+                idempotencyKey: draft.runID,
+                attachments: draft.attachments)
+            if response.runId != draft.runID {
+                self.clearPendingRun(draft.runID)
                 self.pendingRuns.insert(response.runId)
                 self.armPendingRunTimeout(runId: response.runId)
             }
         } catch {
-            self.clearPendingRun(runId)
+            self.clearPendingRun(draft.runID)
             self.errorText = error.localizedDescription
             chatUILogger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
         }

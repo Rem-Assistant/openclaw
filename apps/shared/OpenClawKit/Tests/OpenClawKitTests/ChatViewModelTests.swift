@@ -422,6 +422,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         return ids.last
     }
 
+    func historyCallCount() async -> Int {
+        await self.state.historyCallCount
+    }
+
     func abortedRunIds() async -> [String] {
         await self.state.abortedRunIds
     }
@@ -490,6 +494,70 @@ extension TestChatTransportState {
 }
 
 @Suite struct ChatViewModelTests {
+    @Test func repeatedViewAppearanceKeepsWarmSessionWithoutReloadingHistory() async throws {
+        let history = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "already warm", timestamp: 1)])
+        let (transport, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm)
+        try await waitUntil("initial bootstrap finishes") {
+            await MainActor.run { !vm.isLoading }
+        }
+
+        await MainActor.run {
+            vm.load()
+            vm.load()
+        }
+        try await Task.sleep(for: .milliseconds(25))
+
+        #expect(await transport.historyCallCount() == 1)
+        #expect(await MainActor.run {
+            vm.messages.first?.content.first?.text == "already warm" && !vm.isLoading
+        })
+    }
+
+    @Test func sessionSwitchClearsPriorPixelsBeforeAsyncHistoryStarts() async throws {
+        let history = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "prior chat", timestamp: 1)])
+        let (_, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm)
+        try await waitUntil("prior transcript loads") {
+            await MainActor.run { !vm.messages.isEmpty && !vm.isLoading }
+        }
+
+        let switchedState = await MainActor.run { () -> (Bool, Bool, Bool, String) in
+            vm.input = "draft from prior chat"
+            vm.switchSession(to: "chat-fresh")
+            return (vm.messages.isEmpty, vm.input.isEmpty, vm.isLoading, vm.sessionKey)
+        }
+
+        #expect(switchedState.0)
+        #expect(switchedState.1)
+        #expect(switchedState.2)
+        #expect(switchedState.3 == "chat-fresh")
+    }
+
+    @Test func successfulSubmitClearsComposerInTheCallingActorTurn() async throws {
+        let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+        try await waitUntil("bootstrap finishes") { await MainActor.run { !vm.isLoading } }
+
+        let immediateState = await MainActor.run { () -> (String, Bool, String?) in
+            vm.input = "I'm okay"
+            vm.send()
+            return (
+                vm.input,
+                vm.isSending,
+                vm.messages.last?.content.compactMap(\.text).joined())
+        }
+
+        #expect(immediateState.0.isEmpty)
+        #expect(immediateState.1)
+        #expect(immediateState.2 == "I'm okay")
+        try await waitUntil("transport receives captured draft") {
+            await transport.lastSentRunId() != nil
+        }
+    }
+
     @Test func staleActiveSessionCompletionRetriesAndReassertsLatestKey() async throws {
         let aGate = AsyncGate()
         let aRequests = AsyncCounter()
