@@ -147,6 +147,7 @@ private func sendMessageAndEmitFinal(
 {
     await sendUserMessage(vm, text: text)
     try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+    try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
     let runId = try #require(await transport.lastSentRunId())
     transport.emit(
@@ -283,6 +284,7 @@ private actor TestChatTransportState {
     var abortedRunIds: [String] = []
     var patchedModels: [String?] = []
     var patchedThinkingLevels: [String] = []
+    var sendPreparationPhases: [OpenClawChatSendPreparationPhase] = []
 }
 
 private final class TestChatTransport: @unchecked Sendable, OpenClawChatTransport {
@@ -298,6 +300,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
     private let setSessionThinkingHook: (@Sendable (String) async throws -> Void)?
+    private let sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)?
+    private let sendMessageHook: (@Sendable (String) async throws -> OpenClawChatSendResponse)?
 
     private let stream: AsyncStream<OpenClawChatTransportEvent>
     private let continuation: AsyncStream<OpenClawChatTransportEvent>.Continuation
@@ -313,7 +317,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
-        setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil)
+        setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil,
+        sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)? = nil,
+        sendMessageHook: (@Sendable (String) async throws -> OpenClawChatSendResponse)? = nil)
     {
         self.historyResponses = historyResponses
         self.historyRequestHook = historyRequestHook
@@ -326,6 +332,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.compactSessionHook = compactSessionHook
         self.setSessionModelHook = setSessionModelHook
         self.setSessionThinkingHook = setSessionThinkingHook
+        self.sendPreparationHook = sendPreparationHook
+        self.sendMessageHook = sendMessageHook
         var cont: AsyncStream<OpenClawChatTransportEvent>.Continuation!
         self.stream = AsyncStream { c in
             cont = c
@@ -366,7 +374,22 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     {
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
+        if let sendMessageHook = self.sendMessageHook {
+            return try await sendMessageHook(idempotencyKey)
+        }
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
+    }
+
+    func observeSendPreparation(
+        sessionKey _: String,
+        idempotencyKey _: String,
+        phase: OpenClawChatSendPreparationPhase,
+        startedAtUptimeNanoseconds _: UInt64,
+        messageLength _: Int,
+        attachmentsCount _: Int
+    ) async {
+        await self.state.sendPreparationPhasesAppend(phase)
+        await self.sendPreparationHook?(phase)
     }
 
     func abortRun(sessionKey _: String, runId: String) async throws {
@@ -456,12 +479,20 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         await self.state.patchedThinkingLevels
     }
 
+    func sendPreparationPhases() async -> [OpenClawChatSendPreparationPhase] {
+        await self.state.sendPreparationPhases
+    }
+
     func resetSessionKeys() async -> [String] {
         await self.state.resetSessionKeys
     }
 
     func compactSessionKeys() async -> [String] {
         await self.state.compactSessionKeys
+    }
+
+    func historyCallCount() async -> Int {
+        await self.state.historyCallCount
     }
 }
 
@@ -498,6 +529,10 @@ extension TestChatTransportState {
         self.patchedThinkingLevels.append(v)
     }
 
+    fileprivate func sendPreparationPhasesAppend(_ phase: OpenClawChatSendPreparationPhase) {
+        self.sendPreparationPhases.append(phase)
+    }
+
     fileprivate func resetSessionKeysAppend(_ v: String) {
         self.resetSessionKeys.append(v)
     }
@@ -508,6 +543,28 @@ extension TestChatTransportState {
 }
 
 @Suite struct ChatViewModelTests {
+    @Test func sessionSwitchClearsConversationScopedComposerState() async {
+        let transport = TestChatTransport(historyResponses: [historyPayload(sessionKey: "other")])
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        await MainActor.run {
+            vm.input = "private draft"
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x01]),
+                    fileName: "private.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.switchSession(to: "other")
+        }
+
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.attachments.isEmpty })
+    }
+
     @Test func staleActiveSessionCompletionRetriesAndReassertsLatestKey() async throws {
         let aGate = AsyncGate()
         let aRequests = AsyncCounter()
@@ -828,6 +885,7 @@ extension TestChatTransportState {
         try await loadAndWaitBootstrap(vm: vm)
         await sendUserMessage(vm)
         try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
         let runId = try #require(await transport.lastSentRunId())
         transport.emit(
@@ -1490,7 +1548,7 @@ extension TestChatTransportState {
             vm.selectModel("openai/gpt-5.4-pro")
         }
 
-        try await waitUntil("two model patches complete") {
+        try await waitUntil("two model patches complete", timeoutSeconds: 6) {
             let patched = await transport.patchedModels()
             return patched == ["openai/gpt-5.4", "openai/gpt-5.4-pro"]
         }
@@ -1539,6 +1597,18 @@ extension TestChatTransportState {
             await MainActor.run { vm.isSending }
         }
         #expect(await transport.lastSentRunId() == nil)
+        try await waitUntil("preparation reaches model patch wait") {
+            await transport.sendPreparationPhases() == [
+                .started,
+                .optimisticAppendCompleted,
+                .modelPatchWaitStarted,
+            ]
+        }
+        #expect(await transport.sendPreparationPhases() == [
+            .started,
+            .optimisticAppendCompleted,
+            .modelPatchWaitStarted,
+        ])
 
         await MainActor.run { vm.selectThinkingLevel("high") }
         try await waitUntil("thinking level changed while send is blocked") {
@@ -1550,7 +1620,383 @@ extension TestChatTransportState {
         try await waitUntil("send released after model patch") {
             await transport.lastSentRunId() != nil
         }
+        #expect(await transport.sendPreparationPhases() == [
+            .started,
+            .optimisticAppendCompleted,
+            .modelPatchWaitStarted,
+            .modelPatchWaitEnded,
+        ])
         #expect(await transport.sentThinkingLevels() == ["off"])
+    }
+
+    @Test func preparationObserverCannotEraseDraftTypedAfterSend() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "first")
+        try await waitUntil("preparation observer starts") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.input = "next draft" }
+        await gate.open()
+
+        try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
+        #expect(await MainActor.run { vm.input } == "next draft")
+    }
+
+    @Test func optimisticAppendIsVisibleBeforePreparationObserverSuspends() async throws {
+        let startedGate = AsyncGate()
+        let completedGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await startedGate.wait() }
+                if phase == .optimisticAppendCompleted { await completedGate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "measure me")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.messages.contains { $0.role == "user" } })
+
+        await startedGate.open()
+        try await waitUntil("send reaches optimistic append marker") {
+            await transport.sendPreparationPhases() == [.started, .optimisticAppendCompleted]
+        }
+        #expect(await MainActor.run { vm.messages.contains { $0.role == "user" } })
+
+        await completedGate.open()
+        try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
+    }
+
+    @Test func switchingSessionDuringPreparationFinishesOldSendWithoutLeakingMessage() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "private to main")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.switchSession(to: "other") }
+        #expect(await MainActor.run { vm.sessionKey } == "main")
+        await gate.open()
+
+        try await waitUntil("old send completes while other session loads") {
+            await MainActor.run { vm.sessionKey == "other" && !vm.isLoading && !vm.isSending }
+        }
+        #expect(await transport.lastSentRunId() != nil)
+        #expect(await MainActor.run { vm.messages.allSatisfy { message in
+            !message.content.contains { $0.text == "private to main" }
+        } })
+    }
+
+    @Test func latestSessionTapCancelsQueuedNavigationBackToSource() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "main")],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "stay on main")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.switchSession(to: "other")
+            vm.switchSession(to: "main")
+        }
+        await gate.open()
+
+        try await waitUntil("send settles on source") {
+            await MainActor.run { vm.sessionKey == "main" && !vm.isSending }
+        }
+        #expect(await transport.historyCallCount() == 1)
+    }
+
+    @Test func agentEventsAreIgnoredWhileDestinationSessionIdentityIsLoading() async throws {
+        let destinationGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [],
+            historyRequestHook: { sessionKey in
+                if sessionKey == "other" { await destinationGate.wait() }
+                return historyPayload(sessionKey: sessionKey, sessionId: "session-\(sessionKey)")
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "session-main")
+
+        await MainActor.run { vm.switchSession(to: "other") }
+        try await waitUntil("destination bootstrap clears session identity") {
+            await MainActor.run { vm.sessionKey == "other" && vm.isLoading && vm.sessionId == nil }
+        }
+        transport.emit(
+            .agent(
+                OpenClawAgentEventPayload(
+                    runId: "session-main",
+                    seq: 1,
+                    stream: "assistant",
+                    ts: Int(Date().timeIntervalSince1970 * 1000),
+                    data: ["text": AnyCodable("private old reply")])))
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(await MainActor.run { vm.streamingAssistantText } == nil)
+        #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
+
+        await destinationGate.open()
+        try await waitUntil("destination loads") { await MainActor.run { !vm.isLoading } }
+    }
+
+    @Test func firstAgentEventBindsFreshSessionAndStreamsActivity() async throws {
+        let freshSessionID = "fresh-session-id"
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "chat-new", sessionId: nil)])
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "chat-new", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+        #expect(await MainActor.run { vm.sessionId == nil })
+
+        await sendUserMessage(vm, text: "hello from a new chat")
+        try await waitUntil("fresh send is pending") {
+            await MainActor.run { vm.pendingRunCount == 1 && !vm.isSending }
+        }
+        emitAssistantText(transport: transport, runId: freshSessionID, text: "streaming fresh reply")
+        emitToolStart(transport: transport, runId: freshSessionID)
+
+        try await waitUntil("fresh activity appears") {
+            await MainActor.run {
+                vm.sessionId == freshSessionID &&
+                    vm.streamingAssistantText == "streaming fresh reply" &&
+                    vm.pendingToolCalls.count == 1
+            }
+        }
+    }
+
+    @Test func failedSendStillAppliesQueuedNavigationAndKeepsDraftWithSourceSession() async throws {
+        let gate = AsyncGate()
+        struct ExpectedFailure: Error {}
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            },
+            sendMessageHook: { _ in throw ExpectedFailure() })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "retry on main")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.switchSession(to: "other") }
+        await gate.open()
+
+        try await waitUntil("failed send settles on requested destination") {
+            await MainActor.run { vm.sessionKey == "other" && !vm.isSending }
+        }
+        #expect(await MainActor.run { vm.input.isEmpty })
+        await MainActor.run { vm.switchSession(to: "main") }
+        #expect(await MainActor.run { vm.input } == "retry on main")
+    }
+
+    @Test func abortedSendStillAppliesQueuedNavigationAndKeepsDraftWithSourceSession() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "cancelled on main")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.switchSession(to: "other")
+            vm.abort()
+        }
+        try await waitUntil("abort requested") { await transport.abortedRunIds().count == 1 }
+        await gate.open()
+
+        try await waitUntil("aborted send settles on requested destination") {
+            await MainActor.run { vm.sessionKey == "other" && !vm.isSending }
+        }
+        #expect(await MainActor.run { vm.input.isEmpty })
+        await MainActor.run { vm.switchSession(to: "main") }
+        #expect(await MainActor.run { vm.input } == "cancelled on main")
+    }
+
+    @Test func abortWhilePreparationObserverIsSuspendedNeverSends() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "cancel me")
+        try await waitUntil("preparation observer starts") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.abort() }
+        try await waitUntil("preparing run abort requested") {
+            await transport.abortedRunIds().count == 1
+        }
+        #expect(await MainActor.run { vm.pendingRunCount } == 0)
+
+        await gate.open()
+        try await waitUntil("cancelled preparation settles") {
+            await MainActor.run { !vm.isSending }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+    }
+
+    @Test func cancellationDoesNotMixOldAttachmentIntoNewTextDraft() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "old text"
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x01]),
+                    fileName: "old-private.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.send()
+        }
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.input = "new draft"
+            vm.abort()
+        }
+        try await waitUntil("abort requested") { await transport.abortedRunIds().count == 1 }
+        await gate.open()
+        try await waitUntil("cancelled send settles") { await MainActor.run { !vm.isSending } }
+
+        #expect(await MainActor.run { vm.input } == "new draft")
+        #expect(await MainActor.run { vm.attachments.isEmpty })
+    }
+
+    @Test func cancellationDoesNotMixOldTextIntoNewAttachmentDraft() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "old text")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x02]),
+                    fileName: "new-only.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.abort()
+        }
+        try await waitUntil("abort requested") { await transport.abortedRunIds().count == 1 }
+        await gate.open()
+        try await waitUntil("cancelled send settles") { await MainActor.run { !vm.isSending } }
+
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.attachments.map(\.fileName) } == ["new-only.txt"])
+    }
+
+    @Test func abortWhileWaitingForModelPatchSettlesWithoutSending() async throws {
+        let modelGate = AsyncGate()
+        let now = Date().timeIntervalSince1970 * 1000
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [sessionEntry(key: "main", updatedAt: now, model: nil)]),
+            ],
+            modelResponses: [
+                [modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai")],
+            ],
+            setSessionModelHook: { _ in await modelGate.wait() })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("model patch starts") { await transport.patchedModels().count == 1 }
+        await sendUserMessage(vm, text: "cancel model wait")
+        try await waitUntil("send waits for model patch") {
+            await transport.sendPreparationPhases().contains(.modelPatchWaitStarted)
+        }
+
+        await MainActor.run { vm.abort() }
+        try await waitUntil("cancelled model wait settles") {
+            await MainActor.run { !vm.isSending && vm.pendingRunCount == 0 }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.messages.allSatisfy { $0.role != "user" } })
+        #expect(await MainActor.run { vm.input } == "cancel model wait")
+        await modelGate.open()
     }
 
     @Test func failedLatestModelSelectionDoesNotReplayAfterOlderCompletionFinishes() async throws {
@@ -2173,6 +2619,7 @@ Hello?
 
         await sendUserMessage(vm)
         try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
         let runId = try #require(await transport.lastSentRunId())
         await MainActor.run { vm.abort() }
@@ -2195,6 +2642,43 @@ Hello?
                     errorMessage: nil)))
 
         try await waitUntil("pending run clears") { await MainActor.run { vm.pendingRunCount == 0 } }
+    }
+
+    @Test func abortDoesNotCancelAlreadyTransmittedSend() async throws {
+        let sendGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendMessageHook: { runId in
+                await sendGate.wait()
+                return OpenClawChatSendResponse(runId: runId, status: "ok")
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "already sent")
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
+        let runId = try #require(await transport.lastSentRunId())
+        await MainActor.run { vm.abort() }
+        try await waitUntil("abortRun called") { await transport.abortedRunIds() == [runId] }
+
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+        await sendGate.open()
+        try await waitUntil("transmitted send returns") { await MainActor.run { !vm.isSending } }
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+
+        transport.emit(
+            .chat(
+                OpenClawChatEventPayload(
+                    runId: runId,
+                    sessionKey: "main",
+                    state: "aborted",
+                    message: nil,
+                    errorMessage: nil)))
+        try await waitUntil("terminal event clears pending") {
+            await MainActor.run { vm.pendingRunCount == 0 }
+        }
     }
 
     @Test func sessionsListDecodesPaginationMetadata() throws {

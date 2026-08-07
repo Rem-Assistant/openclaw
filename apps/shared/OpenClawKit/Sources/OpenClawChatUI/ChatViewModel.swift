@@ -53,9 +53,17 @@ public final class OpenClawChatViewModel {
     private nonisolated(unsafe) var eventTask: Task<Void, Never>?
     @ObservationIgnored
     private nonisolated(unsafe) var bootstrapTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var activeSendTask: Task<Void, Never>?
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
+    private var queuedSessionKeyAfterSend: String?
+    private struct ComposerDraft {
+        var input: String
+        var attachments: [OpenClawPendingAttachment]
+    }
+    private var composerDraftsBySession: [String: ComposerDraft] = [:]
     private var sessionRefreshCount = 0
     private var nextSessionListRequestID: UInt64 = 0
     private var appliedSessionListRequestID: UInt64 = 0
@@ -68,6 +76,7 @@ public final class OpenClawChatViewModel {
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
     }
+    private var preparingRuns = Set<String>()
 
     @ObservationIgnored
     private nonisolated(unsafe) var pendingRunTimeoutTasks: [String: Task<Void, Never>] = [:]
@@ -79,7 +88,7 @@ public final class OpenClawChatViewModel {
     private var latestModelSelectionIDsBySession: [String: String] = [:]
     private var lastSuccessfulModelSelectionIDsBySession: [String: String] = [:]
     private var inFlightModelPatchCountsBySession: [String: Int] = [:]
-    private var modelPatchWaitersBySession: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var modelPatchWaitersBySession: [String: [UUID: CheckedContinuation<Void, Never>]] = [:]
     private var nextThinkingSelectionRequestID: UInt64 = 0
     private var latestThinkingSelectionRequestIDsBySession: [String: UInt64] = [:]
     private var latestThinkingLevelsBySession: [String: String] = [:]
@@ -128,6 +137,7 @@ public final class OpenClawChatViewModel {
     deinit {
         self.eventTask?.cancel()
         self.bootstrapTask?.cancel()
+        self.activeSendTask?.cancel()
         for (_, task) in self.pendingRunTimeoutTasks {
             task.cancel()
         }
@@ -142,7 +152,12 @@ public final class OpenClawChatViewModel {
     }
 
     public func send() {
-        Task { await self.performSend() }
+        guard self.activeSendTask == nil else { return }
+        self.activeSendTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performSend()
+            self.activeSendTask = nil
+        }
     }
 
     public func abort() {
@@ -163,10 +178,35 @@ public final class OpenClawChatViewModel {
     public func switchSession(to sessionKey: String) {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
+        // Once Send is accepted, finish preparation and transport acknowledgement against the
+        // captured conversation before changing the shared transcript. This prevents both silent
+        // message loss and old-run activity from appearing in the destination during bootstrap.
+        if self.isSending {
+            // The latest tap is authoritative. Returning to the source conversation cancels an
+            // earlier queued destination instead of unexpectedly navigating after Send settles.
+            self.queuedSessionKeyAfterSend = next == self.sessionKey ? nil : next
+            return
+        }
         guard next != self.sessionKey else { return }
+        self.performSessionSwitch(to: next)
+    }
+
+    private func performSessionSwitch(to next: String) {
+        if self.input.isEmpty, self.attachments.isEmpty {
+            self.composerDraftsBySession[self.sessionKey] = nil
+        } else {
+            self.composerDraftsBySession[self.sessionKey] = ComposerDraft(
+                input: self.input,
+                attachments: self.attachments)
+        }
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
+        // Composer state belongs to one conversation. Carrying a draft or attachment across a
+        // route change can leak it into the next chat and suppress that destination's prefill.
+        let destinationDraft = self.composerDraftsBySession[next]
+        self.input = destinationDraft?.input ?? ""
+        self.attachments = destinationDraft?.attachments ?? []
         self.modelSelectionID = Self.defaultModelSelectionID
         self.startBootstrap()
     }
@@ -640,17 +680,35 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        let composerInput = self.input
+        let attachments = self.attachments
+        let sessionRequest = self.currentSessionRequest()
+        let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         self.isSending = true
         self.errorText = nil
         let runId = UUID().uuidString
-        let messageText = trimmed.isEmpty && !self.attachments.isEmpty ? "See attached." : trimmed
+        let messageText = trimmed.isEmpty && !attachments.isEmpty ? "See attached." : trimmed
         let thinkingLevel = self.thinkingLevel
         self.pendingRuns.insert(runId)
+        self.preparingRuns.insert(runId)
         self.armPendingRunTimeout(runId: runId)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
+        // Snapshot and clear the composer before the first suspension point. Diagnostic hooks
+        // must never cause a later continuation to erase a draft or attachment added meanwhile.
+        self.input = ""
+        self.attachments = []
+        defer {
+            self.preparingRuns.remove(runId)
+            self.isSending = false
+            if let queuedSessionKey = self.queuedSessionKeyAfterSend {
+                self.queuedSessionKeyAfterSend = nil
+                self.performSessionSwitch(to: queuedSessionKey)
+            }
+        }
 
-        // Optimistically append user message to UI.
+        // Append without awaiting diagnostics so clearing the composer always has immediate,
+        // visible feedback. The captured monotonic start still includes encoding and UI work.
         var userContent: [OpenClawChatMessageContent] = [
             OpenClawChatMessageContent(
                 type: "text",
@@ -664,7 +722,7 @@ public final class OpenClawChatViewModel {
                 name: nil,
                 arguments: nil),
         ]
-        let encodedAttachments = self.attachments.map { att -> OpenClawChatAttachmentPayload in
+        let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
             OpenClawChatAttachmentPayload(
                 type: att.type,
                 mimeType: att.mimeType,
@@ -685,19 +743,50 @@ public final class OpenClawChatViewModel {
                     name: nil,
                     arguments: nil))
         }
+        let optimisticMessageID = UUID()
         self.messages.append(
             OpenClawChatMessage(
-                id: UUID(),
+                id: optimisticMessageID,
                 role: "user",
                 content: userContent,
                 timestamp: Date().timeIntervalSince1970 * 1000))
 
-        // Clear input immediately for responsive UX (before network await)
-        self.input = ""
-        self.attachments = []
-
         do {
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .started,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .optimisticAppendCompleted,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .modelPatchWaitStarted,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
             await self.waitForPendingModelPatches(in: sessionKey)
+            try Task.checkCancellation()
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .modelPatchWaitEnded,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            self.preparingRuns.remove(runId)
             let response = try await self.transport.sendMessage(
                 sessionKey: sessionKey,
                 message: messageText,
@@ -709,13 +798,33 @@ public final class OpenClawChatViewModel {
                 self.pendingRuns.insert(response.runId)
                 self.armPendingRunTimeout(runId: response.runId)
             }
-        } catch {
+        } catch is CancellationError {
+            self.messages.removeAll { $0.id == optimisticMessageID }
+            if self.isCurrentSessionRequest(sessionRequest) {
+                // Restore the captured composer as one unit only when the user has not started a
+                // replacement draft. Mixing old text or attachments with new work can leak data.
+                if self.input.isEmpty, self.attachments.isEmpty {
+                    self.input = composerInput
+                    self.attachments = attachments
+                }
+            }
             self.clearPendingRun(runId)
-            self.errorText = error.localizedDescription
+        } catch {
+            self.messages.removeAll { $0.id == optimisticMessageID }
+            if self.isCurrentSessionRequest(sessionRequest),
+               self.input.isEmpty,
+               self.attachments.isEmpty
+            {
+                self.input = composerInput
+                self.attachments = attachments
+            }
+            self.clearPendingRun(runId)
+            if self.isCurrentSessionRequest(sessionRequest) {
+                self.errorText = error.localizedDescription
+            }
             chatUILogger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
         }
 
-        self.isSending = false
     }
 
     private func performAbort() async {
@@ -725,6 +834,14 @@ public final class OpenClawChatViewModel {
         defer { self.isAborting = false }
 
         let runIds = Array(self.pendingRuns)
+        let preparingRunIds = runIds.filter { self.preparingRuns.contains($0) }
+        if !preparingRunIds.isEmpty {
+            self.activeSendTask?.cancel()
+        }
+        for runId in preparingRunIds {
+            self.preparingRuns.remove(runId)
+            self.clearPendingRun(runId)
+        }
         for runId in runIds {
             do {
                 try await self.transport.abortRun(sessionKey: self.sessionKey, runId: runId)
@@ -955,8 +1072,8 @@ public final class OpenClawChatViewModel {
         let remaining = max(0, (self.inFlightModelPatchCountsBySession[sessionKey] ?? 0) - 1)
         if remaining == 0 {
             self.inFlightModelPatchCountsBySession.removeValue(forKey: sessionKey)
-            let waiters = self.modelPatchWaitersBySession.removeValue(forKey: sessionKey) ?? []
-            for waiter in waiters {
+            let waiters = self.modelPatchWaitersBySession.removeValue(forKey: sessionKey) ?? [:]
+            for waiter in waiters.values {
                 waiter.resume()
             }
             return
@@ -966,9 +1083,29 @@ public final class OpenClawChatViewModel {
 
     private func waitForPendingModelPatches(in sessionKey: String) async {
         guard (self.inFlightModelPatchCountsBySession[sessionKey] ?? 0) > 0 else { return }
-        await withCheckedContinuation { continuation in
-            self.modelPatchWaitersBySession[sessionKey, default: []].append(continuation)
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                self.modelPatchWaitersBySession[sessionKey, default: [:]][waiterID] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelModelPatchWaiter(waiterID, sessionKey: sessionKey)
+            }
         }
+    }
+
+    private func cancelModelPatchWaiter(_ waiterID: UUID, sessionKey: String) {
+        guard let continuation = self.modelPatchWaitersBySession[sessionKey]?.removeValue(forKey: waiterID)
+        else { return }
+        if self.modelPatchWaitersBySession[sessionKey]?.isEmpty == true {
+            self.modelPatchWaitersBySession.removeValue(forKey: sessionKey)
+        }
+        continuation.resume()
     }
 
     private func syncThinkingLevelOptions() {
@@ -1372,8 +1509,16 @@ public final class OpenClawChatViewModel {
     }
 
     private func handleAgentEvent(_ evt: OpenClawAgentEventPayload) {
-        if let sessionId, evt.runId != sessionId {
-            return
+        // A destination bootstrap is not yet authoritative, so a finishing event from the prior
+        // conversation must not populate it. A stable brand-new conversation legitimately has no
+        // session ID until its first agent event; bind that ID only while our own first run is
+        // pending and the transport has confirmed the active session key.
+        guard !self.isLoading, self.confirmedActiveSessionKey == self.sessionKey else { return }
+        if let sessionId {
+            guard evt.runId == sessionId else { return }
+        } else {
+            guard !self.pendingRuns.isEmpty else { return }
+            self.sessionId = evt.runId
         }
 
         switch evt.stream {
