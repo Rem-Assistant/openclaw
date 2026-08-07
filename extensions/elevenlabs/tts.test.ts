@@ -104,6 +104,36 @@ describe("elevenlabs tts diagnostics", () => {
     expect(getHeadersFromFirstFetchCall(fetchMock).get("accept")).toBe("audio/mpeg");
   });
 
+  it("propagates external cancellation to the provider HTTP request", async () => {
+    let requestSignal: AbortSignal | undefined;
+    let markRequestStarted: (() => void) | undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) =>
+        await new Promise<Response>((_resolve, reject) => {
+          requestSignal = init?.signal ?? undefined;
+          markRequestStarted?.();
+          requestSignal?.addEventListener(
+            "abort",
+            () => reject(requestSignal?.reason ?? new DOMException("cancelled", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const controller = new AbortController();
+
+    const synthesis = elevenLabsTTS({ ...createDefaultTtsRequest(), signal: controller.signal });
+    await requestStarted;
+    controller.abort();
+
+    expect(requestSignal).toBeDefined();
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(synthesis).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("omits the MPEG Accept header for PCM telephony output", async () => {
     const fetchMock = vi.fn(async () => new Response(Buffer.from("pcm")));
     globalThis.fetch = fetchMock as unknown as typeof fetch;

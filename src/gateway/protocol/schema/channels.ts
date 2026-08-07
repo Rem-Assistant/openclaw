@@ -19,6 +19,7 @@ export const TalkConfigParamsSchema = Type.Object(
 export const TalkSpeakParamsSchema = Type.Object(
   {
     text: NonEmptyString,
+    previewId: Type.Optional(NonEmptyString),
     voiceId: Type.Optional(Type.String()),
     modelId: Type.Optional(Type.String()),
     outputFormat: Type.Optional(Type.String()),
@@ -32,6 +33,13 @@ export const TalkSpeakParamsSchema = Type.Object(
     normalize: Type.Optional(Type.String()),
     language: Type.Optional(Type.String()),
     latencyTier: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkSpeakCancelParamsSchema = Type.Object(
+  {
+    previewId: NonEmptyString,
   },
   { additionalProperties: false },
 );
@@ -592,6 +600,14 @@ export const TalkSpeakResultSchema = Type.Object(
     voiceCompatible: Type.Optional(Type.Boolean()),
     mimeType: Type.Optional(Type.String()),
     fileExtension: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkSpeakCancelResultSchema = Type.Object(
+  {
+    ok: Type.Boolean(),
+    cancelled: Type.Boolean(),
   },
   { additionalProperties: false },
 );

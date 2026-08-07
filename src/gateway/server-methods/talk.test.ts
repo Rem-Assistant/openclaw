@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeResolvedSecretInputString } from "../../config/types.secrets.js";
 import { ErrorCodes } from "../protocol/index.js";
+import { resetTalkSpeechCancellationForTests } from "../talk-speech-cancellation.js";
 import { talkHandlers } from "./talk.js";
 
 const mocks = vi.hoisted(() => ({
@@ -377,6 +378,7 @@ describe("talk.voices handler", () => {
 describe("talk.speak handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetTalkSpeechCancellationForTests();
   });
 
   it("uses the active runtime config snapshot instead of the raw config snapshot", async () => {
@@ -441,6 +443,70 @@ describe("talk.speak handler", () => {
       mimeType: "audio/mpeg",
       fileExtension: ".mp3",
     });
+  });
+
+  it("cancels an in-flight provider synthesis and treats repeat cancellation as idempotent", async () => {
+    const runtimeConfig = createTalkConfig("env-acme-key");
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    });
+    let providerSignal: AbortSignal | undefined;
+    mocks.synthesizeSpeech.mockImplementation(
+      async ({ signal }: { signal?: AbortSignal }) =>
+        await new Promise((_, reject) => {
+          providerSignal = signal;
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("cancelled", "AbortError")),
+            {
+              once: true,
+            },
+          );
+        }),
+    );
+    const client = { connId: "conn-a", connect: { role: "operator" } } as never;
+    const speakRespond = vi.fn();
+
+    const speakRequest = talkHandlers["talk.speak"]({
+      req: { type: "req", id: "speak", method: "talk.speak" },
+      params: { text: "Preview this voice.", previewId: "preview-a" },
+      client,
+      isWebchatConnect: () => false,
+      respond: speakRespond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+    await vi.waitFor(() => expect(providerSignal).toBeDefined());
+
+    const cancelRespond = vi.fn();
+    await talkHandlers["talk.speak.cancel"]({
+      req: { type: "req", id: "cancel", method: "talk.speak.cancel" },
+      params: { previewId: "preview-a" },
+      client,
+      isWebchatConnect: () => false,
+      respond: cancelRespond as never,
+      context: {} as never,
+    });
+    await speakRequest;
+
+    expect(providerSignal?.aborted).toBe(true);
+    expectRespondOk(cancelRespond, { ok: true, cancelled: true });
+    const repeatRespond = vi.fn();
+    await talkHandlers["talk.speak.cancel"]({
+      req: { type: "req", id: "cancel-repeat", method: "talk.speak.cancel" },
+      params: { previewId: "preview-a" },
+      client,
+      isWebchatConnect: () => false,
+      respond: repeatRespond as never,
+      context: {} as never,
+    });
+    expectRespondOk(repeatRespond, { ok: true, cancelled: false });
+    expectRespondError(speakRespond, { code: ErrorCodes.UNAVAILABLE });
   });
 });
 

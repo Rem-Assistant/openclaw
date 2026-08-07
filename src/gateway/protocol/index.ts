@@ -109,6 +109,10 @@ import {
   TalkSessionTurnParamsSchema,
   type TalkSpeakParams,
   TalkSpeakParamsSchema,
+  type TalkSpeakCancelParams,
+  TalkSpeakCancelParamsSchema,
+  type TalkSpeakCancelResult,
+  TalkSpeakCancelResultSchema,
   type TalkSpeakResult,
   TalkSpeakResultSchema,
   type ChannelsStatusParams,
@@ -643,6 +647,12 @@ export const validateTalkSessionCloseParams = ajv.compile<TalkSessionCloseParams
 export const validateTalkSessionOkResult =
   ajv.compile<TalkSessionOkResult>(TalkSessionOkResultSchema);
 export const validateTalkSpeakParams = ajv.compile<TalkSpeakParams>(TalkSpeakParamsSchema);
+export const validateTalkSpeakCancelParams = ajv.compile<TalkSpeakCancelParams>(
+  TalkSpeakCancelParamsSchema,
+);
+export const validateTalkSpeakCancelResult = ajv.compile<TalkSpeakCancelResult>(
+  TalkSpeakCancelResultSchema,
+);
 export const validateTalkSpeakResult = ajv.compile<TalkSpeakResult>(TalkSpeakResultSchema);
 export const validateChannelsStatusParams = ajv.compile<ChannelsStatusParams>(
   ChannelsStatusParamsSchema,
@@ -902,6 +912,8 @@ export {
   TalkSessionCloseParamsSchema,
   TalkSessionOkResultSchema,
   TalkSpeakParamsSchema,
+  TalkSpeakCancelParamsSchema,
+  TalkSpeakCancelResultSchema,
   TalkSpeakResultSchema,
   ChannelsStatusParamsSchema,
   ChannelsStatusResultSchema,
@@ -1036,6 +1048,8 @@ export type {
   TalkSessionCloseParams,
   TalkSessionOkResult,
   TalkSpeakParams,
+  TalkSpeakCancelParams,
+  TalkSpeakCancelResult,
   TalkSpeakResult,
   TalkModeParams,
   ChannelsStatusParams,
