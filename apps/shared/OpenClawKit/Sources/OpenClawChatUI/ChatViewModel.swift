@@ -82,7 +82,7 @@ public final class OpenClawChatViewModel {
     private var latestModelSelectionIDsBySession: [String: String] = [:]
     private var lastSuccessfulModelSelectionIDsBySession: [String: String] = [:]
     private var inFlightModelPatchCountsBySession: [String: Int] = [:]
-    private var modelPatchWaitersBySession: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var modelPatchWaitersBySession: [String: [UUID: CheckedContinuation<Void, Never>]] = [:]
     private var nextThinkingSelectionRequestID: UInt64 = 0
     private var latestThinkingSelectionRequestIDsBySession: [String: UInt64] = [:]
     private var latestThinkingLevelsBySession: [String: String] = [:]
@@ -771,12 +771,14 @@ public final class OpenClawChatViewModel {
     private func performAbort() async {
         guard !self.pendingRuns.isEmpty else { return }
         guard !self.isAborting else { return }
-        self.activeSendTask?.cancel()
         self.isAborting = true
         defer { self.isAborting = false }
 
         let runIds = Array(self.pendingRuns)
         let preparingRunIds = runIds.filter { self.preparingRuns.contains($0) }
+        if !preparingRunIds.isEmpty {
+            self.activeSendTask?.cancel()
+        }
         for runId in preparingRunIds {
             self.preparingRuns.remove(runId)
             self.clearPendingRun(runId)
@@ -1011,8 +1013,8 @@ public final class OpenClawChatViewModel {
         let remaining = max(0, (self.inFlightModelPatchCountsBySession[sessionKey] ?? 0) - 1)
         if remaining == 0 {
             self.inFlightModelPatchCountsBySession.removeValue(forKey: sessionKey)
-            let waiters = self.modelPatchWaitersBySession.removeValue(forKey: sessionKey) ?? []
-            for waiter in waiters {
+            let waiters = self.modelPatchWaitersBySession.removeValue(forKey: sessionKey) ?? [:]
+            for waiter in waiters.values {
                 waiter.resume()
             }
             return
@@ -1022,9 +1024,29 @@ public final class OpenClawChatViewModel {
 
     private func waitForPendingModelPatches(in sessionKey: String) async {
         guard (self.inFlightModelPatchCountsBySession[sessionKey] ?? 0) > 0 else { return }
-        await withCheckedContinuation { continuation in
-            self.modelPatchWaitersBySession[sessionKey, default: []].append(continuation)
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                self.modelPatchWaitersBySession[sessionKey, default: [:]][waiterID] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelModelPatchWaiter(waiterID, sessionKey: sessionKey)
+            }
         }
+    }
+
+    private func cancelModelPatchWaiter(_ waiterID: UUID, sessionKey: String) {
+        guard let continuation = self.modelPatchWaitersBySession[sessionKey]?.removeValue(forKey: waiterID)
+        else { return }
+        if self.modelPatchWaitersBySession[sessionKey]?.isEmpty == true {
+            self.modelPatchWaitersBySession.removeValue(forKey: sessionKey)
+        }
+        continuation.resume()
     }
 
     private func syncThinkingLevelOptions() {

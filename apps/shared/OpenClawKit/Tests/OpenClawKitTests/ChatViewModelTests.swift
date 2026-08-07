@@ -301,6 +301,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
     private let setSessionThinkingHook: (@Sendable (String) async throws -> Void)?
     private let sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)?
+    private let sendMessageHook: (@Sendable (String) async throws -> OpenClawChatSendResponse)?
 
     private let stream: AsyncStream<OpenClawChatTransportEvent>
     private let continuation: AsyncStream<OpenClawChatTransportEvent>.Continuation
@@ -317,7 +318,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
         setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil,
-        sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)? = nil)
+        sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)? = nil,
+        sendMessageHook: (@Sendable (String) async throws -> OpenClawChatSendResponse)? = nil)
     {
         self.historyResponses = historyResponses
         self.historyRequestHook = historyRequestHook
@@ -331,6 +333,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.setSessionModelHook = setSessionModelHook
         self.setSessionThinkingHook = setSessionThinkingHook
         self.sendPreparationHook = sendPreparationHook
+        self.sendMessageHook = sendMessageHook
         var cont: AsyncStream<OpenClawChatTransportEvent>.Continuation!
         self.stream = AsyncStream { c in
             cont = c
@@ -371,6 +374,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     {
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
+        if let sendMessageHook = self.sendMessageHook {
+            return try await sendMessageHook(idempotencyKey)
+        }
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
     }
 
@@ -1670,6 +1676,40 @@ extension TestChatTransportState {
         #expect(await transport.lastSentRunId() == nil)
     }
 
+    @Test func abortWhileWaitingForModelPatchSettlesWithoutSending() async throws {
+        let modelGate = AsyncGate()
+        let now = Date().timeIntervalSince1970 * 1000
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [sessionEntry(key: "main", updatedAt: now, model: nil)]),
+            ],
+            modelResponses: [
+                [modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai")],
+            ],
+            setSessionModelHook: { _ in await modelGate.wait() })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("model patch starts") { await transport.patchedModels().count == 1 }
+        await sendUserMessage(vm, text: "cancel model wait")
+        try await waitUntil("send waits for model patch") {
+            await transport.sendPreparationPhases().contains(.modelPatchWaitStarted)
+        }
+
+        await MainActor.run { vm.abort() }
+        try await waitUntil("cancelled model wait settles") {
+            await MainActor.run { !vm.isSending && vm.pendingRunCount == 0 }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+        await modelGate.open()
+    }
+
     @Test func failedLatestModelSelectionDoesNotReplayAfterOlderCompletionFinishes() async throws {
         let now = Date().timeIntervalSince1970 * 1000
         let history = historyPayload()
@@ -2313,6 +2353,43 @@ Hello?
                     errorMessage: nil)))
 
         try await waitUntil("pending run clears") { await MainActor.run { vm.pendingRunCount == 0 } }
+    }
+
+    @Test func abortDoesNotCancelAlreadyTransmittedSend() async throws {
+        let sendGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendMessageHook: { runId in
+                await sendGate.wait()
+                return OpenClawChatSendResponse(runId: runId, status: "ok")
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "already sent")
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
+        let runId = try #require(await transport.lastSentRunId())
+        await MainActor.run { vm.abort() }
+        try await waitUntil("abortRun called") { await transport.abortedRunIds() == [runId] }
+
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+        await sendGate.open()
+        try await waitUntil("transmitted send returns") { await MainActor.run { !vm.isSending } }
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+
+        transport.emit(
+            .chat(
+                OpenClawChatEventPayload(
+                    runId: runId,
+                    sessionKey: "main",
+                    state: "aborted",
+                    message: nil,
+                    errorMessage: nil)))
+        try await waitUntil("terminal event clears pending") {
+            await MainActor.run { vm.pendingRunCount == 0 }
+        }
     }
 
     @Test func sessionsListDecodesPaginationMetadata() throws {
