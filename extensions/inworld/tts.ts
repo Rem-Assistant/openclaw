@@ -54,6 +54,7 @@ export async function inworldTTS(params: {
   sampleRateHertz?: number;
   temperature?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const baseUrl = normalizeInworldBaseUrl(params.baseUrl);
   const url = `${baseUrl}/tts/v1/voice:stream`;
@@ -81,6 +82,7 @@ export async function inworldTTS(params: {
         Authorization: `Basic ${params.apiKey}`,
       },
       body: requestBody,
+      signal: params.signal,
     },
     timeoutMs: params.timeoutMs,
     policy: ssrfPolicyFromInworldBaseUrl(baseUrl),

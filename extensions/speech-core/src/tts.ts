@@ -1291,6 +1291,7 @@ export async function synthesizeSpeech(params: {
         timeoutMs,
         signal: params.signal,
       });
+      params.signal?.throwIfAborted();
       const latencyMs = Date.now() - providerStart;
       attempts.push({
         provider,

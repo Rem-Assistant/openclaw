@@ -617,6 +617,31 @@ describe("speech-core native voice-note routing", () => {
     expect(fallbackSynthesize).not.toHaveBeenCalled();
   });
 
+  it("rejects a completed provider result when cancellation arrived during synthesis", async () => {
+    const controller = new AbortController();
+    installSpeechProviders([
+      createMockSpeechProvider("mock", {
+        synthesize: async () => {
+          controller.abort();
+          return {
+            audioBuffer: Buffer.from("stale-audio"),
+            fileExtension: ".mp3",
+            outputFormat: "mp3",
+            voiceCompatible: false,
+          };
+        },
+      }),
+    ]);
+
+    await expect(
+      synthesizeSpeech({
+        text: "Do not return this cancelled preview.",
+        cfg: createTtsConfig("openclaw-speech-core-post-completion-cancel-test"),
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("does not mark skipped telephony providers as missing persona bindings", async () => {
     const result = await textToSpeechTelephony({
       text: "Use telephony provider.",

@@ -299,6 +299,46 @@ describe("talk.catalog handler", () => {
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("stt-key");
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("live-key");
   });
+
+  it("reports the active provider configured from canonical Talk credentials", async () => {
+    const isConfigured = vi.fn(
+      ({ providerConfig }: { providerConfig: Record<string, unknown> }) =>
+        providerConfig.apiKey === "talk-only-key",
+    );
+    const provider = {
+      id: "acme",
+      label: "Acme Speech",
+      isConfigured,
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    };
+    mocks.listSpeechProviders.mockReturnValue([provider as never]);
+    mocks.getSpeechProvider.mockReturnValue(provider);
+    mocks.getResolvedSpeechProviderConfig.mockReturnValue({});
+
+    const respond = vi.fn();
+    await talkHandlers["talk.catalog"]({
+      req: { type: "req", id: "talk-only", method: "talk.catalog" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => createTalkConfig("talk-only-key") } as never,
+    });
+
+    const result = expectRespondOk(respond) as {
+      speech: { providers: Array<{ configured: boolean }> };
+    };
+    expect(result.speech.providers[0]?.configured).toBe(true);
+    expect(isConfigured).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerConfig: expect.objectContaining({ apiKey: "talk-only-key" }),
+      }),
+    );
+  });
 });
 
 describe("talk.voices handler", () => {
@@ -366,6 +406,53 @@ describe("talk.voices handler", () => {
       undefined,
     );
     expect(JSON.stringify(respond.mock.calls[0]?.[1])).not.toContain("secret-elevenlabs-key");
+  });
+
+  it("inherits messages.tts credentials consistently for voice listing", async () => {
+    const runtimeConfig = {
+      talk: { provider: "acme", providers: { acme: { voiceId: "voice-a" } } },
+      messages: {
+        tts: {
+          provider: "acme",
+          providers: { acme: { apiKey: "tts-only-key" } },
+        },
+      },
+    } as OpenClawConfig;
+    const isConfigured = vi.fn(
+      ({ providerConfig }: { providerConfig: Record<string, unknown> }) =>
+        providerConfig.apiKey === "tts-only-key",
+    );
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      listVoices: vi.fn(),
+      isConfigured,
+      resolveTalkConfig: ({
+        baseTtsConfig,
+        talkProviderConfig,
+      }: {
+        baseTtsConfig: { providers?: Record<string, Record<string, unknown>> };
+        talkProviderConfig: Record<string, unknown>;
+      }) => ({ ...baseTtsConfig.providers?.acme, ...talkProviderConfig }),
+    });
+    mocks.listSpeechVoices.mockResolvedValue([{ id: "voice-a" }]);
+
+    const respond = vi.fn();
+    await talkHandlers["talk.voices"]({
+      req: { type: "req", id: "tts-only", method: "talk.voices" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    expectRespondOk(respond, { provider: "acme" });
+    expect(isConfigured).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerConfig: expect.objectContaining({ apiKey: "tts-only-key" }),
+      }),
+    );
   });
 
   it("surfaces an unavailable error when Talk has no active speech provider", async () => {

@@ -90,6 +90,18 @@ describe("Inworld guarded dispatcher lifecycle", () => {
       expect(release).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("forwards cancellation to the guarded provider request", async () => {
+    const chunk = Buffer.from("audio").toString("base64");
+    queueGuardedResponse(
+      new Response(JSON.stringify({ result: { audioContent: chunk } }), { status: 200 }),
+    );
+    const controller = new AbortController();
+
+    await inworldTTS({ text: "cancel me", apiKey: "test-key", signal: controller.signal });
+
+    expect(lastGuardRequest().init?.signal).toBe(controller.signal);
+  });
 });
 
 describe("listInworldVoices", () => {

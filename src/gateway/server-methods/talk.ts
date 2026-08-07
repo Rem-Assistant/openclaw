@@ -149,10 +149,13 @@ function resolveTalkVoiceId(
   return requested;
 }
 
-function buildTalkTtsConfig(
-  config: OpenClawConfig,
-):
-  | { cfg: OpenClawConfig; provider: string; providerConfig: TalkProviderConfig }
+function buildTalkTtsConfig(config: OpenClawConfig):
+  | {
+      cfg: OpenClawConfig;
+      provider: string;
+      providerConfig: TalkProviderConfig;
+      resolvedProviderConfig: TalkProviderConfig;
+    }
   | { error: string; reason: TalkSpeakReason } {
   const resolved = resolveActiveTalkProviderConfig(config.talk);
   const provider = canonicalizeSpeechProviderId(resolved?.provider, config);
@@ -193,6 +196,7 @@ function buildTalkTtsConfig(
   return {
     provider,
     providerConfig,
+    resolvedProviderConfig,
     cfg: {
       ...config,
       messages: {
@@ -205,6 +209,7 @@ function buildTalkTtsConfig(
 
 function buildTalkCatalog(config: OpenClawConfig) {
   const ttsConfig = resolveTtsConfig(config);
+  const talkSetup = buildTalkTtsConfig(config);
   const talkResolved = resolveActiveTalkProviderConfig(config.talk);
   const activeSpeechProvider = canonicalizeSpeechProviderId(talkResolved?.provider, config);
   const streamingConfig = getVoiceCallStreamingConfig(config);
@@ -221,13 +226,17 @@ function buildTalkCatalog(config: OpenClawConfig) {
     speech: {
       ...(activeSpeechProvider ? { activeProvider: activeSpeechProvider } : {}),
       providers: listSpeechProviders(config).map((provider) => {
+        const providerConfig =
+          !("error" in talkSetup) && provider.id === talkSetup.provider
+            ? talkSetup.resolvedProviderConfig
+            : getResolvedSpeechProviderConfig(ttsConfig, provider.id, config);
         const entry: Record<string, unknown> = {
           id: provider.id,
           label: provider.label,
           configured: configuredOrFalse(() =>
             provider.isConfigured({
               cfg: config,
-              providerConfig: getResolvedSpeechProviderConfig(ttsConfig, provider.id, config),
+              providerConfig,
               timeoutMs: ttsConfig.timeoutMs,
             }),
           ),
@@ -563,7 +572,7 @@ export const talkHandlers: GatewayRequestHandlers = {
       if (
         !speechProvider.isConfigured({
           cfg: setup.cfg,
-          providerConfig: setup.providerConfig,
+          providerConfig: setup.resolvedProviderConfig,
           timeoutMs: setup.cfg.messages?.tts?.timeoutMs ?? 30_000,
         })
       ) {
@@ -728,6 +737,7 @@ export const talkHandlers: GatewayRequestHandlers = {
         disableFallback: true,
         signal: controller?.signal,
       });
+      controller?.signal.throwIfAborted();
       if (!result.success || !result.audioBuffer) {
         respond(
           false,
