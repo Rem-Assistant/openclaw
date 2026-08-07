@@ -664,56 +664,14 @@ public final class OpenClawChatViewModel {
         self.armPendingRunTimeout(runId: runId)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
-        defer {
-            self.preparingRuns.remove(runId)
-            self.isSending = false
-        }
-
-        // Optimistically append user message to UI.
-        var userContent: [OpenClawChatMessageContent] = [
-            OpenClawChatMessageContent(
-                type: "text",
-                text: messageText,
-                thinking: nil,
-                thinkingSignature: nil,
-                mimeType: nil,
-                fileName: nil,
-                content: nil,
-                id: nil,
-                name: nil,
-                arguments: nil),
-        ]
-        let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
-            OpenClawChatAttachmentPayload(
-                type: att.type,
-                mimeType: att.mimeType,
-                fileName: att.fileName,
-                content: att.data.base64EncodedString())
-        }
-        for att in encodedAttachments {
-            userContent.append(
-                OpenClawChatMessageContent(
-                    type: att.type,
-                    text: nil,
-                    thinking: nil,
-                    thinkingSignature: nil,
-                    mimeType: att.mimeType,
-                    fileName: att.fileName,
-                    content: AnyCodable(att.content),
-                    id: nil,
-                    name: nil,
-                    arguments: nil))
-        }
-        self.messages.append(
-            OpenClawChatMessage(
-                id: UUID(),
-                role: "user",
-                content: userContent,
-                timestamp: Date().timeIntervalSince1970 * 1000))
         // Snapshot and clear the composer before the first suspension point. Diagnostic hooks
         // must never cause a later continuation to erase a draft or attachment added meanwhile.
         self.input = ""
         self.attachments = []
+        defer {
+            self.preparingRuns.remove(runId)
+            self.isSending = false
+        }
 
         do {
             await self.transport.observeSendPreparation(
@@ -721,8 +679,52 @@ public final class OpenClawChatViewModel {
                 idempotencyKey: runId,
                 phase: .started,
                 messageLength: messageText.count,
-                attachmentsCount: encodedAttachments.count)
+                attachmentsCount: attachments.count)
             try Task.checkCancellation()
+
+            // Optimistically append the user message after the start marker so attachment
+            // encoding and UI mutation are included in measured preparation time.
+            var userContent: [OpenClawChatMessageContent] = [
+                OpenClawChatMessageContent(
+                    type: "text",
+                    text: messageText,
+                    thinking: nil,
+                    thinkingSignature: nil,
+                    mimeType: nil,
+                    fileName: nil,
+                    content: nil,
+                    id: nil,
+                    name: nil,
+                    arguments: nil),
+            ]
+            let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
+                OpenClawChatAttachmentPayload(
+                    type: att.type,
+                    mimeType: att.mimeType,
+                    fileName: att.fileName,
+                    content: att.data.base64EncodedString())
+            }
+            for att in encodedAttachments {
+                userContent.append(
+                    OpenClawChatMessageContent(
+                        type: att.type,
+                        text: nil,
+                        thinking: nil,
+                        thinkingSignature: nil,
+                        mimeType: att.mimeType,
+                        fileName: att.fileName,
+                        content: AnyCodable(att.content),
+                        id: nil,
+                        name: nil,
+                        arguments: nil))
+            }
+            self.messages.append(
+                OpenClawChatMessage(
+                    id: UUID(),
+                    role: "user",
+                    content: userContent,
+                    timestamp: Date().timeIntervalSince1970 * 1000))
+
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,

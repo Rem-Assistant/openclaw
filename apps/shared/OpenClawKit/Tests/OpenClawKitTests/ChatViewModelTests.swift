@@ -1647,6 +1647,37 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.input } == "next draft")
     }
 
+    @Test func optimisticAppendOccursBetweenPreparationMarkers() async throws {
+        let startedGate = AsyncGate()
+        let completedGate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await startedGate.wait() }
+                if phase == .optimisticAppendCompleted { await completedGate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "measure me")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.messages.allSatisfy { $0.role != "user" } })
+
+        await startedGate.open()
+        try await waitUntil("send reaches optimistic append marker") {
+            await transport.sendPreparationPhases() == [.started, .optimisticAppendCompleted]
+        }
+        #expect(await MainActor.run { vm.messages.contains { $0.role == "user" } })
+
+        await completedGate.open()
+        try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
+    }
+
     @Test func abortWhilePreparationObserverIsSuspendedNeverSends() async throws {
         let gate = AsyncGate()
         let transport = TestChatTransport(
