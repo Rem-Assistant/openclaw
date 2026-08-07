@@ -1344,7 +1344,7 @@ describe("listSessionsFromStore selected model display", () => {
     }
   });
 
-  test("caps transcript title and last-message hydration for bulk list responses", async () => {
+  test("hydrates every explicitly requested transcript row", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-cap-"));
     try {
       const storePath = path.join(tmpDir, "sessions.json");
@@ -1383,8 +1383,8 @@ describe("listSessionsFromStore selected model display", () => {
       expect(result.sessions[0]?.lastMessagePreview).toBe("last 0");
       expect(result.sessions[99]?.derivedTitle).toBe("title 99");
       expect(result.sessions[99]?.lastMessagePreview).toBe("last 99");
-      expect(result.sessions[100]?.derivedTitle).toBeUndefined();
-      expect(result.sessions[100]?.lastMessagePreview).toBeUndefined();
+      expect(result.sessions[100]?.derivedTitle).toBe("title 100");
+      expect(result.sessions[100]?.lastMessagePreview).toBe("last 100");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

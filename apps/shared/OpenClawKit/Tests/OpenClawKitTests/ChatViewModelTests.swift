@@ -2204,7 +2204,13 @@ Hello?
           "totalCount": 245,
           "limitApplied": 100,
           "hasMore": true,
-          "sessions": []
+          "sessions": [
+            {
+              "key": "agent:main:older-chat",
+              "derivedTitle": "Older chat title",
+              "lastMessagePreview": "Older chat preview"
+            }
+          ]
         }
         """.utf8)
 
@@ -2216,6 +2222,8 @@ Hello?
         #expect(response.totalCount == 245)
         #expect(response.limitApplied == 100)
         #expect(response.hasMore == true)
+        #expect(response.sessions.first?.derivedTitle == "Older chat title")
+        #expect(response.sessions.first?.lastMessagePreview == "Older chat preview")
     }
 
     @Test func slowerSmallerSessionWindowCannotReplaceLargerWindow() async {

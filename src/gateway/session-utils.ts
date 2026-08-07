@@ -2098,7 +2098,6 @@ export function listSessionsFromStore(params: {
   const { cfg, storePath, store, opts } = params;
   const now = Date.now();
   const sessionListTranscriptUsageMaxBytes = 64 * 1024;
-  const sessionListTranscriptFieldRows = 100;
   let rowContext: SessionListRowContext | undefined;
   const getRowContext = () => {
     rowContext ??= buildSessionListRowContext({ store, now });
@@ -2117,8 +2116,7 @@ export function listSessionsFromStore(params: {
   });
   const { entries, totalCount, limitApplied } = selection;
 
-  const sessions = entries.map(([key, entry], index) => {
-    const includeTranscriptFields = index < sessionListTranscriptFieldRows;
+  const sessions = entries.map(([key, entry]) => {
     return buildGatewaySessionRow({
       cfg,
       storePath,
@@ -2127,8 +2125,8 @@ export function listSessionsFromStore(params: {
       entry,
       modelCatalog: params.modelCatalog,
       now,
-      includeDerivedTitles: includeTranscriptFields && includeDerivedTitles,
-      includeLastMessage: includeTranscriptFields && includeLastMessage,
+      includeDerivedTitles,
+      includeLastMessage,
       transcriptUsageMaxBytes: sessionListTranscriptUsageMaxBytes,
       storeChildSessionsByKey: getRowContext().storeChildSessionsByKey,
       rowContext: getRowContext(),
@@ -2167,7 +2165,6 @@ export async function listSessionsFromStoreAsync(params: {
   const { cfg, storePath, store, opts } = params;
   const now = Date.now();
   const sessionListTranscriptUsageMaxBytes = 64 * 1024;
-  const sessionListTranscriptFieldRows = 100;
   let rowContext: SessionListRowContext | undefined;
   const getRowContext = () => {
     rowContext ??= buildSessionListRowContext({ store, now });
@@ -2189,7 +2186,6 @@ export async function listSessionsFromStoreAsync(params: {
   const sessions: GatewaySessionRow[] = [];
   for (let i = 0; i < entries.length; i++) {
     const [key, entry] = entries[i];
-    const includeTranscriptFields = i < sessionListTranscriptFieldRows;
     const row = buildGatewaySessionRow({
       cfg,
       storePath,
@@ -2208,7 +2204,6 @@ export async function listSessionsFromStoreAsync(params: {
     });
     if (
       entry?.sessionId &&
-      includeTranscriptFields &&
       (includeDerivedTitles || includeLastMessage)
     ) {
       const parsed = parseAgentSessionKey(key);

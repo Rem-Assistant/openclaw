@@ -85,6 +85,8 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
     public let space: String?
     public let updatedAt: Double?
     public let sessionId: String?
+    public let derivedTitle: String?
+    public let lastMessagePreview: String?
 
     public let systemSent: Bool?
     public let abortedLastRun: Bool?
@@ -112,6 +114,8 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         space: String?,
         updatedAt: Double?,
         sessionId: String?,
+        derivedTitle: String? = nil,
+        lastMessagePreview: String? = nil,
         systemSent: Bool?,
         abortedLastRun: Bool?,
         thinkingLevel: String?,
@@ -135,6 +139,8 @@ public struct OpenClawChatSessionEntry: Codable, Identifiable, Sendable, Hashabl
         self.space = space
         self.updatedAt = updatedAt
         self.sessionId = sessionId
+        self.derivedTitle = derivedTitle
+        self.lastMessagePreview = lastMessagePreview
         self.systemSent = systemSent
         self.abortedLastRun = abortedLastRun
         self.thinkingLevel = thinkingLevel
