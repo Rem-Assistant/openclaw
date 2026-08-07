@@ -9,6 +9,7 @@ export {
   extractProviderRequestId,
   formatProviderErrorPayload,
   formatProviderHttpErrorMessage,
+  ProviderHttpError,
   readResponseTextLimited,
   truncateErrorDetail,
 } from "../agents/provider-http-errors.js";

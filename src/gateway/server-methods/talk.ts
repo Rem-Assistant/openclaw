@@ -1,3 +1,4 @@
+import { ProviderHttpError } from "../../agents/provider-http-errors.js";
 import { readConfigFileSnapshot } from "../../config/config.js";
 import { redactConfigObject } from "../../config/redact-snapshot.js";
 import {
@@ -69,6 +70,40 @@ type TalkSpeakErrorDetails = {
   reason: TalkSpeakReason;
   fallbackEligible: boolean;
 };
+
+type TalkVoicesReason =
+  | "provider_unsupported"
+  | "provider_not_configured"
+  | "provider_authentication"
+  | "provider_rate_limited"
+  | "provider_quota"
+  | "provider_configuration"
+  | "provider_transient";
+
+function talkVoicesError(reason: TalkVoicesReason, message: string) {
+  return errorShape(ErrorCodes.UNAVAILABLE, message, {
+    details: { reason },
+  });
+}
+
+function classifyTalkVoicesProviderError(error: unknown): TalkVoicesReason {
+  if (!(error instanceof ProviderHttpError)) {
+    return "provider_transient";
+  }
+  if (error.status === 401 || error.status === 403) {
+    return "provider_authentication";
+  }
+  if (error.status === 402) {
+    return "provider_quota";
+  }
+  if (error.status === 429) {
+    return "provider_rate_limited";
+  }
+  if (error.status === 400 || error.status === 404 || error.status === 422) {
+    return "provider_configuration";
+  }
+  return "provider_transient";
+}
 function canReadTalkSecrets(client: { connect?: { scopes?: string[] } } | null): boolean {
   const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
   return scopes.includes(ADMIN_SCOPE) || scopes.includes(TALK_SECRETS_SCOPE);
@@ -525,7 +560,40 @@ export const talkHandlers: GatewayRequestHandlers = {
     try {
       const setup = buildTalkTtsConfig(context.getRuntimeConfig());
       if ("error" in setup) {
-        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, setup.error));
+        const reason: TalkVoicesReason =
+          setup.reason === "talk_provider_unsupported"
+            ? "provider_unsupported"
+            : "provider_not_configured";
+        respond(false, undefined, talkVoicesError(reason, setup.error));
+        return;
+      }
+      const speechProvider = getSpeechProvider(setup.provider, setup.cfg);
+      if (!speechProvider?.listVoices) {
+        respond(
+          false,
+          undefined,
+          talkVoicesError(
+            "provider_unsupported",
+            "voice choices are unavailable for the configured speech provider",
+          ),
+        );
+        return;
+      }
+      if (
+        !speechProvider.isConfigured({
+          cfg: setup.cfg,
+          providerConfig: setup.providerConfig,
+          timeoutMs: setup.cfg.messages?.tts?.timeoutMs ?? 30_000,
+        })
+      ) {
+        respond(
+          false,
+          undefined,
+          talkVoicesError(
+            "provider_not_configured",
+            "voice choices are unavailable until speech is configured",
+          ),
+        );
         return;
       }
       const voices = await listSpeechVoices({ provider: setup.provider, cfg: setup.cfg });
@@ -546,7 +614,11 @@ export const talkHandlers: GatewayRequestHandlers = {
         undefined,
       );
     } catch (err) {
-      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
+      respond(
+        false,
+        undefined,
+        talkVoicesError(classifyTalkVoicesProviderError(err), formatForLog(err)),
+      );
     }
   },
   "talk.config": async ({ params, respond, client, context }) => {
@@ -647,6 +719,14 @@ export const talkHandlers: GatewayRequestHandlers = {
       previewId && connectionId ? beginTalkSpeech(connectionId, previewId) : undefined;
 
     try {
+      // A cancellation may have reached the socket before this request was
+      // dispatched. `beginTalkSpeech` consumes that bounded tombstone into an
+      // already-aborted controller; stop before provider setup or synthesis so
+      // the reversed delivery order cannot overlap or bill the provider.
+      if (controller?.signal.aborted) {
+        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "talk synthesis cancelled"));
+        return;
+      }
       const runtimeConfig = context.getRuntimeConfig();
       const setup = buildTalkTtsConfig(runtimeConfig);
       if ("error" in setup) {

@@ -5,6 +5,7 @@ import {
   cancelTalkSpeechForConnection,
   finishTalkSpeech,
   resetTalkSpeechCancellationForTests,
+  TALK_SPEECH_CANCEL_TOMBSTONE_LIMIT_PER_CONNECTION,
 } from "./talk-speech-cancellation.js";
 
 describe("talk speech cancellation", () => {
@@ -12,14 +13,55 @@ describe("talk speech cancellation", () => {
     resetTalkSpeechCancellationForTests();
   });
 
-  it("cancels an active preview once and is idempotent afterward", () => {
+  it("cancels an active preview once and accepts repeated cancellation idempotently", () => {
     const controller = beginTalkSpeech("conn-a", "preview-a");
     const listener = vi.fn();
     controller.signal.addEventListener("abort", listener);
 
     expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(true);
-    expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(false);
+    expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(true);
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes a reversed-order cancel tombstone before synthesis can begin", () => {
+    expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(true);
+
+    const controller = beginTalkSpeech("conn-a", "preview-a");
+
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("expires bounded cancel tombstones", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-06T00:00:00Z"));
+    expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(true);
+    vi.advanceTimersByTime(30_001);
+
+    const controller = beginTalkSpeech("conn-a", "preview-a");
+
+    expect(controller.signal.aborted).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("fails closed when one connection exceeds its bounded tombstone capacity", () => {
+    for (let index = 0; index <= TALK_SPEECH_CANCEL_TOMBSTONE_LIMIT_PER_CONNECTION; index += 1) {
+      expect(cancelTalkSpeech("conn-a", `preview-${index}`)).toBe(true);
+    }
+
+    expect(beginTalkSpeech("conn-a", "never-seen-before").signal.aborted).toBe(true);
+    expect(beginTalkSpeech("conn-b", "never-seen-before").signal.aborted).toBe(false);
+  });
+
+  it("recovers a saturated connection after expiry", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-06T00:00:00Z"));
+    for (let index = 0; index <= TALK_SPEECH_CANCEL_TOMBSTONE_LIMIT_PER_CONNECTION; index += 1) {
+      cancelTalkSpeech("conn-a", `preview-${index}`);
+    }
+    vi.advanceTimersByTime(30_001);
+
+    expect(beginTalkSpeech("conn-a", "after-expiry").signal.aborted).toBe(false);
+    vi.useRealTimers();
   });
 
   it("scopes identical preview ids to their owning connection", () => {
@@ -40,6 +82,15 @@ describe("talk speech cancellation", () => {
     expect(first.signal.aborted).toBe(true);
     expect(second.signal.aborted).toBe(true);
     expect(other.signal.aborted).toBe(false);
+  });
+
+  it("clears pending tombstones when their owning connection disconnects", () => {
+    expect(cancelTalkSpeech("conn-a", "preview-a")).toBe(true);
+    expect(cancelTalkSpeechForConnection("conn-a")).toBe(0);
+
+    const controller = beginTalkSpeech("conn-a", "preview-a");
+
+    expect(controller.signal.aborted).toBe(false);
   });
 
   it("does not let an older request finish remove its replacement", () => {
