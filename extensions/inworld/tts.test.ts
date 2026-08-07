@@ -1,3 +1,4 @@
+import { ProviderHttpError } from "openclaw/plugin-sdk/provider-http";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 const { fetchWithSsrFGuardMock } = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ import { inworldTTS, listInworldVoices } from "./tts.js";
 type GuardRequest = {
   url: string;
   init?: RequestInit;
+  signal?: AbortSignal;
   auditContext?: string;
   policy?: unknown;
   timeoutMs?: number;
@@ -89,6 +91,18 @@ describe("Inworld guarded dispatcher lifecycle", () => {
       expect(release).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("forwards cancellation to the guarded provider request", async () => {
+    const chunk = Buffer.from("audio").toString("base64");
+    queueGuardedResponse(
+      new Response(JSON.stringify({ result: { audioContent: chunk } }), { status: 200 }),
+    );
+    const controller = new AbortController();
+
+    await inworldTTS({ text: "cancel me", apiKey: "test-key", signal: controller.signal });
+
+    expect(lastGuardRequest().signal).toBe(controller.signal);
+  });
 });
 
 describe("listInworldVoices", () => {
@@ -226,6 +240,19 @@ describe("inworldTTS", () => {
     );
   });
 
+  it.each([401, 402, 429])(
+    "preserves HTTP %s as a structured provider error for gateway recovery",
+    async (status) => {
+      queueGuardedResponse(new Response("provider failure", { status }));
+
+      const error = await inworldTTS({ text: "test", apiKey: "test-key" }).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(ProviderHttpError);
+      expect(error).toMatchObject({ status, detail: "provider failure" });
+    },
+  );
+
   it("throws on in-stream errors", async () => {
     const body = JSON.stringify({
       error: { code: 3, message: "Invalid voice ID" },
@@ -339,5 +366,22 @@ describe("inworldTTS", () => {
       "Inworld TTS API error (500): fail",
     );
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("listInworldVoices structured failures", () => {
+  afterEach(() => {
+    fetchWithSsrFGuardMock.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  it.each([401, 402, 429])("preserves HTTP %s for talk.voices classification", async (status) => {
+    queueGuardedResponse(new Response("provider failure", { status }));
+
+    const error = await listInworldVoices({ apiKey: "test-key" }).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ProviderHttpError);
+    expect(error).toMatchObject({ status, detail: "provider failure" });
   });
 });

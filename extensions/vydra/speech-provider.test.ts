@@ -69,4 +69,40 @@ describe("vydra speech provider", () => {
     expect(result.fileExtension).toBe(".mp3");
     expect(result.audioBuffer).toEqual(Buffer.from("mp3-data"));
   });
+
+  it("cancels the generated asset download", async () => {
+    let downloadSignal: AbortSignal | undefined;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ audioUrl: "https://cdn.vydra.ai/generated/test.mp3" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockImplementationOnce((_url: string | URL | Request, init?: RequestInit) => {
+        downloadSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          downloadSignal?.addEventListener("abort", () => reject(downloadSignal?.reason), {
+            once: true,
+          });
+        });
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const pending = provider.synthesize({
+      text: "OpenClaw test",
+      cfg: {} as never,
+      providerConfig: { apiKey: "vydra-test-key" },
+      target: "audio-file",
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(downloadSignal).toBeInstanceOf(AbortSignal));
+    controller.abort(new Error("preview cancelled"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(downloadSignal?.aborted).toBe(true);
+  });
 });

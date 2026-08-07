@@ -1,3 +1,4 @@
+import { ProviderHttpError } from "../../agents/provider-http-errors.js";
 import { readConfigFileSnapshot } from "../../config/config.js";
 import { redactConfigObject } from "../../config/redact-snapshot.js";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../../tts/provider-registry.js";
 import {
   getResolvedSpeechProviderConfig,
+  listSpeechVoices,
   resolveTtsConfig,
   synthesizeSpeech,
   type TtsDirectiveOverrides,
@@ -37,8 +39,16 @@ import {
   validateTalkCatalogParams,
   validateTalkConfigParams,
   validateTalkModeParams,
+  validateTalkSpeakCancelParams,
   validateTalkSpeakParams,
+  validateTalkVoicesParams,
 } from "../protocol/index.js";
+import { isCanonicalTalkMp3 } from "../talk-mp3-validation.js";
+import {
+  beginTalkSpeech,
+  cancelTalkSpeech,
+  finishTalkSpeech,
+} from "../talk-speech-cancellation.js";
 import { formatForLog } from "../ws-log.js";
 import { asRecord } from "./record-shared.js";
 import { talkClientHandlers } from "./talk-client.js";
@@ -55,12 +65,47 @@ type TalkSpeakReason =
   | "talk_provider_unsupported"
   | "method_unavailable"
   | "synthesis_failed"
-  | "invalid_audio_result";
+  | "invalid_audio_result"
+  | "canonical_audio_unsupported";
 
 type TalkSpeakErrorDetails = {
   reason: TalkSpeakReason;
   fallbackEligible: boolean;
 };
+
+type TalkVoicesReason =
+  | "provider_unsupported"
+  | "provider_not_configured"
+  | "provider_authentication"
+  | "provider_rate_limited"
+  | "provider_quota"
+  | "provider_configuration"
+  | "provider_transient";
+
+function talkVoicesError(reason: TalkVoicesReason, message: string) {
+  return errorShape(ErrorCodes.UNAVAILABLE, message, {
+    details: { reason },
+  });
+}
+
+function classifyTalkVoicesProviderError(error: unknown): TalkVoicesReason {
+  if (!(error instanceof ProviderHttpError)) {
+    return "provider_transient";
+  }
+  if (error.status === 401 || error.status === 403) {
+    return "provider_authentication";
+  }
+  if (error.status === 402) {
+    return "provider_quota";
+  }
+  if (error.status === 429) {
+    return "provider_rate_limited";
+  }
+  if (error.status === 400 || error.status === 404 || error.status === 422) {
+    return "provider_configuration";
+  }
+  return "provider_transient";
+}
 function canReadTalkSecrets(client: { connect?: { scopes?: string[] } } | null): boolean {
   const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
   return scopes.includes(ADMIN_SCOPE) || scopes.includes(TALK_SECRETS_SCOPE);
@@ -104,10 +149,13 @@ function resolveTalkVoiceId(
   return requested;
 }
 
-function buildTalkTtsConfig(
-  config: OpenClawConfig,
-):
-  | { cfg: OpenClawConfig; provider: string; providerConfig: TalkProviderConfig }
+function buildTalkTtsConfig(config: OpenClawConfig):
+  | {
+      cfg: OpenClawConfig;
+      provider: string;
+      providerConfig: TalkProviderConfig;
+      resolvedProviderConfig: TalkProviderConfig;
+    }
   | { error: string; reason: TalkSpeakReason } {
   const resolved = resolveActiveTalkProviderConfig(config.talk);
   const provider = canonicalizeSpeechProviderId(resolved?.provider, config);
@@ -148,6 +196,7 @@ function buildTalkTtsConfig(
   return {
     provider,
     providerConfig,
+    resolvedProviderConfig,
     cfg: {
       ...config,
       messages: {
@@ -160,6 +209,7 @@ function buildTalkTtsConfig(
 
 function buildTalkCatalog(config: OpenClawConfig) {
   const ttsConfig = resolveTtsConfig(config);
+  const talkSetup = buildTalkTtsConfig(config);
   const talkResolved = resolveActiveTalkProviderConfig(config.talk);
   const activeSpeechProvider = canonicalizeSpeechProviderId(talkResolved?.provider, config);
   const streamingConfig = getVoiceCallStreamingConfig(config);
@@ -176,13 +226,17 @@ function buildTalkCatalog(config: OpenClawConfig) {
     speech: {
       ...(activeSpeechProvider ? { activeProvider: activeSpeechProvider } : {}),
       providers: listSpeechProviders(config).map((provider) => {
+        const providerConfig =
+          !("error" in talkSetup) && provider.id === talkSetup.provider
+            ? talkSetup.resolvedProviderConfig
+            : getResolvedSpeechProviderConfig(ttsConfig, provider.id, config);
         const entry: Record<string, unknown> = {
           id: provider.id,
           label: provider.label,
           configured: configuredOrFalse(() =>
             provider.isConfigured({
               cfg: config,
-              providerConfig: getResolvedSpeechProviderConfig(ttsConfig, provider.id, config),
+              providerConfig,
               timeoutMs: ttsConfig.timeoutMs,
             }),
           ),
@@ -273,7 +327,8 @@ function isFallbackEligibleTalkReason(reason: TalkSpeakReason): boolean {
   return (
     reason === "talk_unconfigured" ||
     reason === "talk_provider_unsupported" ||
-    reason === "method_unavailable"
+    reason === "method_unavailable" ||
+    reason === "canonical_audio_unsupported"
   );
 }
 
@@ -333,35 +388,13 @@ function buildTalkSpeakOverrides(
   };
 }
 
-function inferMimeType(
-  outputFormat: string | undefined,
-  fileExtension: string | undefined,
-): string | undefined {
-  const normalizedOutput = normalizeOptionalLowercaseString(outputFormat);
-  const normalizedExtension = normalizeOptionalLowercaseString(fileExtension);
-  if (
-    normalizedOutput === "mp3" ||
-    normalizedOutput?.startsWith("mp3_") ||
-    normalizedOutput?.endsWith("-mp3") ||
-    normalizedExtension === ".mp3"
-  ) {
-    return "audio/mpeg";
-  }
-  if (
-    normalizedOutput === "opus" ||
-    normalizedOutput?.startsWith("opus_") ||
-    normalizedExtension === ".opus" ||
-    normalizedExtension === ".ogg"
-  ) {
-    return "audio/ogg";
-  }
-  if (normalizedOutput?.endsWith("-wav") || normalizedExtension === ".wav") {
-    return "audio/wav";
-  }
-  if (normalizedOutput?.endsWith("-webm") || normalizedExtension === ".webm") {
-    return "audio/webm";
-  }
-  return undefined;
+function isMp3OutputFormat(outputFormat: string | undefined): boolean {
+  const normalized = normalizeOptionalLowercaseString(outputFormat);
+  return (
+    normalized === "mp3" ||
+    normalized?.startsWith("mp3_") === true ||
+    normalized?.endsWith("-mp3") === true
+  );
 }
 
 function resolveTalkResponseFromConfig(params: {
@@ -500,6 +533,84 @@ export const talkHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
     }
   },
+  "talk.voices": async ({ params, respond, context }) => {
+    const voicesParams = params ?? {};
+    if (!validateTalkVoicesParams(voicesParams)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.voices params: ${formatValidationErrors(validateTalkVoicesParams.errors)}`,
+        ),
+      );
+      return;
+    }
+
+    try {
+      const setup = buildTalkTtsConfig(context.getRuntimeConfig());
+      if ("error" in setup) {
+        const reason: TalkVoicesReason =
+          setup.reason === "talk_provider_unsupported"
+            ? "provider_unsupported"
+            : "provider_not_configured";
+        respond(false, undefined, talkVoicesError(reason, setup.error));
+        return;
+      }
+      const speechProvider = getSpeechProvider(setup.provider, setup.cfg);
+      if (!speechProvider?.listVoices) {
+        respond(
+          false,
+          undefined,
+          talkVoicesError(
+            "provider_unsupported",
+            "voice choices are unavailable for the configured speech provider",
+          ),
+        );
+        return;
+      }
+      if (
+        !speechProvider.isConfigured({
+          cfg: setup.cfg,
+          providerConfig: setup.resolvedProviderConfig,
+          timeoutMs: setup.cfg.messages?.tts?.timeoutMs ?? 30_000,
+        })
+      ) {
+        respond(
+          false,
+          undefined,
+          talkVoicesError(
+            "provider_not_configured",
+            "voice choices are unavailable until speech is configured",
+          ),
+        );
+        return;
+      }
+      const voices = await listSpeechVoices({ provider: setup.provider, cfg: setup.cfg });
+      respond(
+        true,
+        {
+          provider: setup.provider,
+          voices: voices.map((voice) => ({
+            id: voice.id,
+            ...(voice.name == null ? {} : { name: voice.name }),
+            ...(voice.category == null ? {} : { category: voice.category }),
+            ...(voice.description == null ? {} : { description: voice.description }),
+            ...(voice.locale == null ? {} : { locale: voice.locale }),
+            ...(voice.gender == null ? {} : { gender: voice.gender }),
+            ...(voice.personalities == null ? {} : { personalities: voice.personalities }),
+          })),
+        },
+        undefined,
+      );
+    } catch (err) {
+      respond(
+        false,
+        undefined,
+        talkVoicesError(classifyTalkVoicesProviderError(err), formatForLog(err)),
+      );
+    }
+  },
   "talk.config": async ({ params, respond, client, context }) => {
     if (!validateTalkConfigParams(params)) {
       respond(
@@ -548,7 +659,7 @@ export const talkHandlers: GatewayRequestHandlers = {
 
     respond(true, { config: configPayload }, undefined);
   },
-  "talk.speak": async ({ params, respond, context }) => {
+  "talk.speak": async ({ params, respond, context, client }) => {
     if (!validateTalkSpeakParams(params)) {
       respond(
         false,
@@ -584,7 +695,28 @@ export const talkHandlers: GatewayRequestHandlers = {
       return;
     }
 
+    const connectionId = typeof client?.connId === "string" ? client.connId : undefined;
+    const previewId = normalizeOptionalString(typedParams.previewId);
+    if (previewId && !connectionId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "talk.speak previewId requires a client connection"),
+      );
+      return;
+    }
+    const controller =
+      previewId && connectionId ? beginTalkSpeech(connectionId, previewId) : undefined;
+
     try {
+      // A cancellation may have reached the socket before this request was
+      // dispatched. `beginTalkSpeech` consumes that bounded tombstone into an
+      // already-aborted controller; stop before provider setup or synthesis so
+      // the reversed delivery order cannot overlap or bill the provider.
+      if (controller?.signal.aborted) {
+        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "talk synthesis cancelled"));
+        return;
+      }
       const runtimeConfig = context.getRuntimeConfig();
       const setup = buildTalkTtsConfig(runtimeConfig);
       if ("error" in setup) {
@@ -603,7 +735,9 @@ export const talkHandlers: GatewayRequestHandlers = {
         cfg: setup.cfg,
         overrides,
         disableFallback: true,
+        signal: controller?.signal,
       });
+      controller?.signal.throwIfAborted();
       if (!result.success || !result.audioBuffer) {
         respond(
           false,
@@ -628,22 +762,68 @@ export const talkHandlers: GatewayRequestHandlers = {
         );
         return;
       }
+      if (!isMp3OutputFormat(result.outputFormat) || !isCanonicalTalkMp3(result.audioBuffer)) {
+        respond(
+          false,
+          undefined,
+          talkSpeakError(
+            "canonical_audio_unsupported",
+            "talk synthesis provider did not return canonical MP3 audio",
+          ),
+        );
+        return;
+      }
 
       respond(
         true,
         {
           audioBase64: result.audioBuffer.toString("base64"),
           provider: result.provider ?? setup.provider,
-          outputFormat: result.outputFormat,
+          outputFormat: "mp3",
           voiceCompatible: result.voiceCompatible,
-          mimeType: inferMimeType(result.outputFormat, result.fileExtension),
-          fileExtension: result.fileExtension,
+          mimeType: "audio/mpeg",
+          fileExtension: ".mp3",
         },
         undefined,
       );
     } catch (err) {
+      if (controller?.signal.aborted) {
+        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "talk synthesis cancelled"));
+        return;
+      }
       respond(false, undefined, talkSpeakError("synthesis_failed", formatForLog(err)));
+    } finally {
+      if (previewId && connectionId && controller) {
+        finishTalkSpeech(connectionId, previewId, controller);
+      }
     }
+  },
+  "talk.speak.cancel": ({ params, respond, client }) => {
+    if (!validateTalkSpeakCancelParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.speak.cancel params: ${formatValidationErrors(validateTalkSpeakCancelParams.errors)}`,
+        ),
+      );
+      return;
+    }
+    const connectionId = typeof client?.connId === "string" ? client.connId : undefined;
+    if (!connectionId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "talk.speak.cancel requires a client connection"),
+      );
+      return;
+    }
+    respond(
+      true,
+      { ok: true, cancelled: cancelTalkSpeech(connectionId, params.previewId) },
+      undefined,
+    );
   },
   "talk.mode": ({ params, respond, context, client, isWebchatConnect }) => {
     if (client && isWebchatConnect(client.connect) && !context.hasConnectedTalkNode()) {

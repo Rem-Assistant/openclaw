@@ -1217,6 +1217,7 @@ export async function synthesizeSpeech(params: {
   timeoutMs?: number;
   agentId?: string;
   accountId?: string;
+  signal?: AbortSignal;
 }): Promise<TtsSynthesisResult> {
   const setup = resolveTtsRequestSetup({
     text: params.text,
@@ -1245,6 +1246,7 @@ export async function synthesizeSpeech(params: {
   );
 
   for (const provider of providers) {
+    params.signal?.throwIfAborted();
     attemptedProviders.push(provider);
     const providerStart = Date.now();
     try {
@@ -1287,7 +1289,9 @@ export async function synthesizeSpeech(params: {
         target,
         providerOverrides: prepared.providerOverrides,
         timeoutMs,
+        signal: params.signal,
       });
+      params.signal?.throwIfAborted();
       const latencyMs = Date.now() - providerStart;
       attempts.push({
         provider,
@@ -1314,6 +1318,9 @@ export async function synthesizeSpeech(params: {
         target,
       };
     } catch (err) {
+      if (params.signal?.aborted) {
+        throw err;
+      }
       const errorMsg = formatTtsProviderError(provider, err);
       const latencyMs = Date.now() - providerStart;
       errors.push(errorMsg);

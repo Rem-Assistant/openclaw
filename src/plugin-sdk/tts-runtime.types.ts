@@ -83,6 +83,7 @@ export type TtsRequestParams = {
   timeoutMs?: number;
   agentId?: string;
   accountId?: string;
+  signal?: AbortSignal;
 };
 
 export type TtsTelephonyRequestParams = {

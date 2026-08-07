@@ -442,6 +442,7 @@ async function synthesizeGoogleTtsPcmOnce(params: {
   audioProfile?: string;
   speakerName?: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const { baseUrl, allowPrivateNetwork, headers, dispatcherPolicy } =
     resolveGoogleGenerativeAiHttpRequestConfig({
@@ -486,6 +487,7 @@ async function synthesizeGoogleTtsPcmOnce(params: {
     pinDns: false,
     allowPrivateNetwork,
     dispatcherPolicy,
+    signal: params.signal,
   });
 
   try {
@@ -521,6 +523,7 @@ async function synthesizeGoogleTtsPcm(params: {
   audioProfile?: string;
   speakerName?: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -528,6 +531,9 @@ async function synthesizeGoogleTtsPcm(params: {
       return await synthesizeGoogleTtsPcmOnce(params);
     } catch (err) {
       lastError = err;
+      if (params.signal?.aborted) {
+        throw err;
+      }
       if (!isGoogleTtsRetryableError(err) || attempt > 0) {
         throw err;
       }
@@ -617,6 +623,7 @@ export function buildGoogleSpeechProvider(): SpeechProviderPlugin {
         audioProfile: overrides.audioProfile ?? config.audioProfile,
         speakerName: overrides.speakerName ?? config.speakerName,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       if (req.target === "voice-note") {
         return {

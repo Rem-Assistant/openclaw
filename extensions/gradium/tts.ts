@@ -9,6 +9,7 @@ export async function gradiumTTS(params: {
   voiceId: string;
   outputFormat: "wav" | "opus" | "ulaw_8000" | "pcm" | "pcm_24000" | "alaw_8000";
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const { text, apiKey, baseUrl, voiceId, outputFormat, timeoutMs } = params;
   const normalizedBaseUrl = normalizeGradiumBaseUrl(baseUrl);
@@ -32,6 +33,7 @@ export async function gradiumTTS(params: {
       }),
     },
     timeoutMs,
+    signal: params.signal,
     policy: { hostnameAllowlist: [hostname] },
     auditContext: "gradium.tts",
   });

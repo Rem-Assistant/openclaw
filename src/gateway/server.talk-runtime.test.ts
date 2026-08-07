@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   invokeTalkSpeakDirect,
@@ -5,10 +7,14 @@ import {
   withSpeechProviders,
 } from "./talk.test-helpers.js";
 
+const canonicalMp3Fixture = readFileSync(
+  fileURLToPath(new URL("../../test/fixtures/talk-canonical.mp3", import.meta.url)),
+);
+
 const synthesizeSpeechMock = vi.hoisted(() =>
   vi.fn<typeof import("../tts/tts.js").synthesizeSpeech>(async () => ({
     success: true,
-    audioBuffer: Buffer.from([7, 8, 9]),
+    audioBuffer: canonicalMp3Fixture,
     provider: "acme",
     outputFormat: "mp3",
     fileExtension: ".mp3",
@@ -99,7 +105,7 @@ describe("gateway talk runtime", () => {
     synthesizeSpeechMock.mockReset();
     synthesizeSpeechMock.mockResolvedValue({
       success: true,
-      audioBuffer: Buffer.from([7, 8, 9]),
+      audioBuffer: canonicalMp3Fixture,
       provider: "acme",
       outputFormat: "mp3",
       fileExtension: ".mp3",
@@ -160,7 +166,7 @@ describe("gateway talk runtime", () => {
 
     await withAcmeSpeechProvider(
       async () => ({
-        audioBuffer: Buffer.from([7, 8, 9]),
+        audioBuffer: canonicalMp3Fixture,
         outputFormat: "mp3",
         fileExtension: ".mp3",
         voiceCompatible: false,
@@ -172,7 +178,7 @@ describe("gateway talk runtime", () => {
         expect(res?.ok, JSON.stringify(res?.error)).toBe(true);
         expect((res?.payload as TalkSpeakTestPayload | undefined)?.provider).toBe("acme");
         expect((res?.payload as TalkSpeakTestPayload | undefined)?.audioBase64).toBe(
-          Buffer.from([7, 8, 9]).toString("base64"),
+          canonicalMp3Fixture.toString("base64"),
         );
       },
     );
@@ -210,25 +216,25 @@ describe("gateway talk runtime", () => {
       async () => {
         synthesizeSpeechMock.mockResolvedValue({
           success: true,
-          audioBuffer: Buffer.from([4, 5, 6]),
+          audioBuffer: canonicalMp3Fixture,
           provider: "elevenlabs",
-          outputFormat: "pcm_44100",
-          fileExtension: ".pcm",
+          outputFormat: "mp3_44100_128",
+          fileExtension: ".mp3",
           voiceCompatible: false,
         });
 
         const res = await invokeTalkSpeakDirect({
           text: "Hello from talk mode.",
           voiceId: "clawd",
-          outputFormat: "pcm_44100",
+          outputFormat: "mp3_44100_128",
           latencyTier: 3,
         });
 
         expect(res?.ok, JSON.stringify(res?.error)).toBe(true);
         expect((res?.payload as TalkSpeakTestPayload | undefined)?.provider).toBe("elevenlabs");
-        expect((res?.payload as TalkSpeakTestPayload | undefined)?.outputFormat).toBe("pcm_44100");
+        expect((res?.payload as TalkSpeakTestPayload | undefined)?.outputFormat).toBe("mp3");
         expect((res?.payload as TalkSpeakTestPayload | undefined)?.audioBase64).toBe(
-          Buffer.from([4, 5, 6]).toString("base64"),
+          canonicalMp3Fixture.toString("base64"),
         );
         const synthesizeParams = expectSingleSynthesizeSpeechCall();
         expect(synthesizeParams.text).toBe("Hello from talk mode.");
@@ -237,7 +243,7 @@ describe("gateway talk runtime", () => {
           providerOverrides: {
             elevenlabs: {
               voiceId: ALIAS_STUB_VOICE_ID,
-              outputFormat: "pcm_44100",
+              outputFormat: "mp3_44100_128",
               latencyTier: 3,
             },
           },

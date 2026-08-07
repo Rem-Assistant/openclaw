@@ -113,6 +113,7 @@ describe("createOpenAiCompatibleSpeechProvider", () => {
       extraJsonBodyFields: [{ configKey: "routing", requestKey: "provider" }],
     });
 
+    const controller = new AbortController();
     const result = await provider.synthesize({
       text: "hello",
       cfg: {} as never,
@@ -128,6 +129,7 @@ describe("createOpenAiCompatibleSpeechProvider", () => {
       },
       target: "voice-note",
       timeoutMs: 1234,
+      signal: controller.signal,
     });
 
     expect(resolveProviderHttpRequestConfigMock).toHaveBeenCalledOnce();
@@ -141,6 +143,7 @@ describe("createOpenAiCompatibleSpeechProvider", () => {
     const postRequest = requireFirstMockArg(postJsonRequestMock);
     expect(postRequest.url).toBe("https://example.test/v1/audio/speech");
     expect(postRequest.timeoutMs).toBe(1234);
+    expect(postRequest.signal).toBe(controller.signal);
     expect(postRequest.body).toStrictEqual({
       model: "override-tts",
       input: "hello",

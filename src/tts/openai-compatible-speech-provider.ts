@@ -374,6 +374,7 @@ export function createOpenAiCompatibleSpeechProvider<
         fetchFn: fetch,
         allowPrivateNetwork,
         dispatcherPolicy,
+        signal: req.signal,
       });
 
       try {

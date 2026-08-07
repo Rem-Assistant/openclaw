@@ -36,6 +36,7 @@ packageExtensionsChecksum: sha256-dYQ0sWkVmDP3h45qaFTG+rd1lBoV5PWy5sLOMeDND7g=
 patchedDependencies:
   '@agentclientprotocol/claude-agent-acp@0.33.1': 3995624bb834cc60fea1461c7ef33f1fcdd8fb58b8f43f2f1490bc689f6e1be2
   baileys@7.0.0-rc10: a9aea1790d2c65b1ae543c77faca4119bbfb91ee3b6ca6c38d1cad4f5702ada2
+  node-edge-tts@1.2.10: 0b49e4d92345852b16e1a14d998c1cc55edef62f68fa11e564a49672467ad9a5
 
 importers:
 
@@ -172,7 +173,7 @@ importers:
         version: 10.2.5
       node-edge-tts:
         specifier: ^1.2.10
-        version: 1.2.10
+        version: 1.2.10(patch_hash=0b49e4d92345852b16e1a14d998c1cc55edef62f68fa11e564a49672467ad9a5)
       openai:
         specifier: ^6.37.0
         version: 6.37.0(ws@8.20.0)(zod@4.4.3)
@@ -1050,7 +1051,7 @@ importers:
     dependencies:
       node-edge-tts:
         specifier: ^1.2.10
-        version: 1.2.10
+        version: 1.2.10(patch_hash=0b49e4d92345852b16e1a14d998c1cc55edef62f68fa11e564a49672467ad9a5)
     devDependencies:
       '@openclaw/plugin-sdk':
         specifier: workspace:*
@@ -6672,7 +6673,7 @@ packages:
     engines: {node: '>=14.18'}
     hasBin: true
 
-  node-edge-tts@1.2.10:
+  node-edge-tts@1.2.10(patch_hash=0b49e4d92345852b16e1a14d998c1cc55edef62f68fa11e564a49672467ad9a5):
     resolution: {integrity: sha512-bV2i4XU54D45+US0Zm1HcJRkifuB3W438dWyuJEHLQdKxnuqlI1kim2MOvR6Q3XUQZvfF9PoDyR1Rt7aeXhPdQ==}
     hasBin: true
 

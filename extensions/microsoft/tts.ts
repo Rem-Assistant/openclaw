@@ -18,7 +18,7 @@ type EdgeTTSRuntimeConfig = {
 
 type EdgeTTSDeps = {
   EdgeTTS: new (config: EdgeTTSRuntimeConfig) => {
-    ttsPromise: (text: string, outputPath: string) => Promise<unknown>;
+    ttsPromise: (text: string, outputPath: string, signal?: AbortSignal) => Promise<unknown>;
   };
 };
 
@@ -80,10 +80,12 @@ export async function edgeTTS(
       timeoutMs?: number;
     };
     timeoutMs: number;
+    signal?: AbortSignal;
   },
   deps?: EdgeTTSDeps,
 ): Promise<void> {
   const { text, outputPath, config, timeoutMs } = params;
+  params.signal?.throwIfAborted();
   if (text.trim().length === 0) {
     throw new Error("Microsoft TTS text cannot be empty");
   }
@@ -105,7 +107,7 @@ export async function edgeTTS(
     const outputSize = await writeEdgeTtsOutput({
       outputPath,
       ttsPromise: async (tempPath) => {
-        await tts.ttsPromise(text, tempPath);
+        await tts.ttsPromise(text, tempPath, params.signal);
       },
     });
     if (outputSize > 0) {

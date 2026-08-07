@@ -19,6 +19,7 @@ import { MAX_PAYLOAD_BYTES, MAX_PREAUTH_PAYLOAD_BYTES } from "../server-constant
 import { clearNodeWakeState } from "../server-methods/nodes-wake-state.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../server-methods/types.js";
 import { formatError } from "../server-utils.js";
+import { cancelTalkSpeechForConnection } from "../talk-speech-cancellation.js";
 import { logWs } from "../ws-log.js";
 import { getHealthVersion, incrementPresenceVersion } from "./health-state.js";
 import type { PreauthConnectionBudget } from "./preauth-connection-budget.js";
@@ -389,6 +390,7 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       }
       const context = buildRequestContext();
       context.unsubscribeAllSessionEvents(connId);
+      cancelTalkSpeechForConnection(connId);
       let currentDisconnectedNodeId: string | null = null;
       if (client?.connect?.role === "node") {
         currentDisconnectedNodeId = context.nodeRegistry.unregister(connId);

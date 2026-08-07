@@ -594,6 +594,54 @@ describe("speech-core native voice-note routing", () => {
     expect(attempt).not.toHaveProperty("personaBinding");
   });
 
+  it("stops provider fallback when an external synthesis signal is aborted", async () => {
+    const controller = new AbortController();
+    const fallbackSynthesize = vi.fn(synthesizeMock);
+    installSpeechProviders([
+      createMockSpeechProvider("mock", {
+        synthesize: async () => {
+          controller.abort();
+          throw new DOMException("cancelled", "AbortError");
+        },
+      }),
+      createMockSpeechProvider("fallback", { synthesize: fallbackSynthesize }),
+    ]);
+
+    await expect(
+      synthesizeSpeech({
+        text: "Cancel this preview.",
+        cfg: createTtsConfig("openclaw-speech-core-cancel-test"),
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fallbackSynthesize).not.toHaveBeenCalled();
+  });
+
+  it("rejects a completed provider result when cancellation arrived during synthesis", async () => {
+    const controller = new AbortController();
+    installSpeechProviders([
+      createMockSpeechProvider("mock", {
+        synthesize: async () => {
+          controller.abort();
+          return {
+            audioBuffer: Buffer.from("stale-audio"),
+            fileExtension: ".mp3",
+            outputFormat: "mp3",
+            voiceCompatible: false,
+          };
+        },
+      }),
+    ]);
+
+    await expect(
+      synthesizeSpeech({
+        text: "Do not return this cancelled preview.",
+        cfg: createTtsConfig("openclaw-speech-core-post-completion-cancel-test"),
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("does not mark skipped telephony providers as missing persona bindings", async () => {
     const result = await textToSpeechTelephony({
       text: "Use telephony provider.",

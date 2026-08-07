@@ -186,6 +186,7 @@ export function buildInworldSpeechProvider(): SpeechProviderPlugin {
         audioEncoding,
         temperature: overrides.temperature ?? config.temperature,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
 
       return {

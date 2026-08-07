@@ -19,6 +19,7 @@ export const TalkConfigParamsSchema = Type.Object(
 export const TalkSpeakParamsSchema = Type.Object(
   {
     text: NonEmptyString,
+    previewId: Type.Optional(NonEmptyString),
     voiceId: Type.Optional(Type.String()),
     modelId: Type.Optional(Type.String()),
     outputFormat: Type.Optional(Type.String()),
@@ -32,6 +33,13 @@ export const TalkSpeakParamsSchema = Type.Object(
     normalize: Type.Optional(Type.String()),
     language: Type.Optional(Type.String()),
     latencyTier: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkSpeakCancelParamsSchema = Type.Object(
+  {
+    previewId: NonEmptyString,
   },
   { additionalProperties: false },
 );
@@ -376,6 +384,29 @@ export const TalkCatalogResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const TalkVoicesParamsSchema = Type.Object({}, { additionalProperties: false });
+
+const TalkVoiceOptionSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    name: Type.Optional(Type.String()),
+    category: Type.Optional(Type.String()),
+    description: Type.Optional(Type.String()),
+    locale: Type.Optional(Type.String()),
+    gender: Type.Optional(Type.String()),
+    personalities: Type.Optional(Type.Array(Type.String())),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkVoicesResultSchema = Type.Object(
+  {
+    provider: NonEmptyString,
+    voices: Type.Array(TalkVoiceOptionSchema),
+  },
+  { additionalProperties: false },
+);
+
 const BrowserRealtimeAudioContractSchema = Type.Object(
   {
     inputEncoding: Type.Union([Type.Literal("pcm16"), Type.Literal("g711_ulaw")]),
@@ -569,6 +600,14 @@ export const TalkSpeakResultSchema = Type.Object(
     voiceCompatible: Type.Optional(Type.Boolean()),
     mimeType: Type.Optional(Type.String()),
     fileExtension: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const TalkSpeakCancelResultSchema = Type.Object(
+  {
+    ok: Type.Boolean(),
+    cancelled: Type.Boolean(),
   },
   { additionalProperties: false },
 );

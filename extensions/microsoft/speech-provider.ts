@@ -268,6 +268,7 @@ export function buildMicrosoftSpeechProvider(): SpeechProviderPlugin {
               outputFormat: format,
             },
             timeoutMs: req.timeoutMs,
+            signal: req.signal,
           });
           const audioBuffer = readFileSync(outputPath);
           return {

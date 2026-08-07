@@ -220,6 +220,7 @@ export function buildXaiSpeechProvider(): SpeechProviderPlugin {
         speed: overrides.speed ?? config.speed,
         responseFormat,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       return {
         audioBuffer,
