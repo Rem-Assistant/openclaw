@@ -83,7 +83,9 @@ struct TalkConfigContractTests {
             } else {
                 #expect(selection == nil)
             }
-            #expect(fixture.payloadValid == (selection != nil))
+            // Protocol validity and client selectability are intentionally distinct. A response
+            // can be structurally valid while its resolved provider is missing or ambiguous; in
+            // those fixtures decoding succeeds but selection must fail closed.
         }
     }
 

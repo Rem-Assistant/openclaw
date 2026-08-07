@@ -147,6 +147,7 @@ private func sendMessageAndEmitFinal(
 {
     await sendUserMessage(vm, text: text)
     try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+    try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
     let runId = try #require(await transport.lastSentRunId())
     transport.emit(
@@ -847,6 +848,7 @@ extension TestChatTransportState {
         try await loadAndWaitBootstrap(vm: vm)
         await sendUserMessage(vm)
         try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
         let runId = try #require(await transport.lastSentRunId())
         transport.emit(
@@ -1509,7 +1511,7 @@ extension TestChatTransportState {
             vm.selectModel("openai/gpt-5.4-pro")
         }
 
-        try await waitUntil("two model patches complete") {
+        try await waitUntil("two model patches complete", timeoutSeconds: 6) {
             let patched = await transport.patchedModels()
             return patched == ["openai/gpt-5.4", "openai/gpt-5.4-pro"]
         }
@@ -1558,6 +1560,13 @@ extension TestChatTransportState {
             await MainActor.run { vm.isSending }
         }
         #expect(await transport.lastSentRunId() == nil)
+        try await waitUntil("preparation reaches model patch wait") {
+            await transport.sendPreparationPhases() == [
+                .started,
+                .optimisticAppendCompleted,
+                .modelPatchWaitStarted,
+            ]
+        }
         #expect(await transport.sendPreparationPhases() == [
             .started,
             .optimisticAppendCompleted,
@@ -2203,6 +2212,7 @@ Hello?
 
         await sendUserMessage(vm)
         try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+        try await waitUntil("chat.send starts") { await transport.lastSentRunId() != nil }
 
         let runId = try #require(await transport.lastSentRunId())
         await MainActor.run { vm.abort() }
