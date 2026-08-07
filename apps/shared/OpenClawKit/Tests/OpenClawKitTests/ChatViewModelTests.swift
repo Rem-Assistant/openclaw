@@ -1679,7 +1679,7 @@ extension TestChatTransportState {
         try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
     }
 
-    @Test func switchingSessionDuringPreparationCannotLeakOrSendOldMessage() async throws {
+    @Test func switchingSessionDuringPreparationFinishesOldSendWithoutLeakingMessage() async throws {
         let gate = AsyncGate()
         let transport = TestChatTransport(
             historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")],
@@ -1698,10 +1698,10 @@ extension TestChatTransportState {
         await MainActor.run { vm.switchSession(to: "other") }
         await gate.open()
 
-        try await waitUntil("other session loads") {
+        try await waitUntil("old send completes while other session loads") {
             await MainActor.run { vm.sessionKey == "other" && !vm.isLoading && !vm.isSending }
         }
-        #expect(await transport.lastSentRunId() == nil)
+        #expect(await transport.lastSentRunId() != nil)
         #expect(await MainActor.run { vm.messages.allSatisfy { message in
             !message.content.contains { $0.text == "private to main" }
         } })

@@ -173,13 +173,6 @@ public final class OpenClawChatViewModel {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         guard next != self.sessionKey else { return }
-        if !self.preparingRuns.isEmpty {
-            self.activeSendTask?.cancel()
-            for runId in self.preparingRuns {
-                self.clearPendingRun(runId)
-            }
-            self.preparingRuns.removeAll()
-        }
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
@@ -736,7 +729,6 @@ public final class OpenClawChatViewModel {
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
-            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
@@ -745,7 +737,6 @@ public final class OpenClawChatViewModel {
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
-            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
@@ -756,7 +747,6 @@ public final class OpenClawChatViewModel {
             try Task.checkCancellation()
             await self.waitForPendingModelPatches(in: sessionKey)
             try Task.checkCancellation()
-            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
@@ -790,7 +780,9 @@ public final class OpenClawChatViewModel {
             self.clearPendingRun(runId)
         } catch {
             self.clearPendingRun(runId)
-            self.errorText = error.localizedDescription
+            if self.isCurrentSessionRequest(sessionRequest) {
+                self.errorText = error.localizedDescription
+            }
             chatUILogger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
         }
 
