@@ -64,7 +64,8 @@ type TalkSpeakReason =
   | "talk_provider_unsupported"
   | "method_unavailable"
   | "synthesis_failed"
-  | "invalid_audio_result";
+  | "invalid_audio_result"
+  | "canonical_audio_unsupported";
 
 type TalkSpeakErrorDetails = {
   reason: TalkSpeakReason;
@@ -316,7 +317,8 @@ function isFallbackEligibleTalkReason(reason: TalkSpeakReason): boolean {
   return (
     reason === "talk_unconfigured" ||
     reason === "talk_provider_unsupported" ||
-    reason === "method_unavailable"
+    reason === "method_unavailable" ||
+    reason === "canonical_audio_unsupported"
   );
 }
 
@@ -376,35 +378,20 @@ function buildTalkSpeakOverrides(
   };
 }
 
-function inferMimeType(
-  outputFormat: string | undefined,
-  fileExtension: string | undefined,
-): string | undefined {
-  const normalizedOutput = normalizeOptionalLowercaseString(outputFormat);
-  const normalizedExtension = normalizeOptionalLowercaseString(fileExtension);
-  if (
-    normalizedOutput === "mp3" ||
-    normalizedOutput?.startsWith("mp3_") ||
-    normalizedOutput?.endsWith("-mp3") ||
-    normalizedExtension === ".mp3"
-  ) {
-    return "audio/mpeg";
+function isMp3OutputFormat(outputFormat: string | undefined): boolean {
+  const normalized = normalizeOptionalLowercaseString(outputFormat);
+  return (
+    normalized === "mp3" ||
+    normalized?.startsWith("mp3_") === true ||
+    normalized?.endsWith("-mp3") === true
+  );
+}
+
+function isLikelyMp3Audio(audio: Buffer): boolean {
+  if (audio.length >= 3 && audio.subarray(0, 3).toString("ascii") === "ID3") {
+    return true;
   }
-  if (
-    normalizedOutput === "opus" ||
-    normalizedOutput?.startsWith("opus_") ||
-    normalizedExtension === ".opus" ||
-    normalizedExtension === ".ogg"
-  ) {
-    return "audio/ogg";
-  }
-  if (normalizedOutput?.endsWith("-wav") || normalizedExtension === ".wav") {
-    return "audio/wav";
-  }
-  if (normalizedOutput?.endsWith("-webm") || normalizedExtension === ".webm") {
-    return "audio/webm";
-  }
-  return undefined;
+  return audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xe0) === 0xe0;
 }
 
 function resolveTalkResponseFromConfig(params: {
@@ -771,16 +758,27 @@ export const talkHandlers: GatewayRequestHandlers = {
         );
         return;
       }
+      if (!isMp3OutputFormat(result.outputFormat) || !isLikelyMp3Audio(result.audioBuffer)) {
+        respond(
+          false,
+          undefined,
+          talkSpeakError(
+            "canonical_audio_unsupported",
+            "talk synthesis provider did not return canonical MP3 audio",
+          ),
+        );
+        return;
+      }
 
       respond(
         true,
         {
           audioBase64: result.audioBuffer.toString("base64"),
           provider: result.provider ?? setup.provider,
-          outputFormat: result.outputFormat,
+          outputFormat: "mp3",
           voiceCompatible: result.voiceCompatible,
-          mimeType: inferMimeType(result.outputFormat, result.fileExtension),
-          fileExtension: result.fileExtension,
+          mimeType: "audio/mpeg",
+          fileExtension: ".mp3",
         },
         undefined,
       );

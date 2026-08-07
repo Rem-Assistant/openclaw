@@ -481,7 +481,7 @@ describe("talk.speak handler", () => {
         return {
           success: true,
           provider: "acme",
-          audioBuffer: Buffer.from([1, 2, 3]),
+          audioBuffer: Buffer.from("ID3canonical-mp3"),
           outputFormat: "mp3",
           voiceCompatible: false,
           fileExtension: ".mp3",
@@ -507,10 +507,47 @@ describe("talk.speak handler", () => {
     });
     expectRespondOk(respond, {
       provider: "acme",
-      audioBase64: Buffer.from([1, 2, 3]).toString("base64"),
+      audioBase64: Buffer.from("ID3canonical-mp3").toString("base64"),
       outputFormat: "mp3",
       mimeType: "audio/mpeg",
       fileExtension: ".mp3",
+    });
+  });
+
+  it("rejects a Google-style WAV result before it reaches a native MP3 parser", async () => {
+    const runtimeConfig = createTalkConfig("env-acme-key");
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    });
+    mocks.synthesizeSpeech.mockResolvedValue({
+      success: true,
+      provider: "google",
+      audioBuffer: Buffer.from("RIFFgoogle-wav-fixture"),
+      outputFormat: "wav",
+      voiceCompatible: false,
+      fileExtension: ".wav",
+    });
+
+    const respond = vi.fn();
+    await talkHandlers["talk.speak"]({
+      req: { type: "req", id: "wav", method: "talk.speak" },
+      params: { text: "Do not feed WAV to the MP3 player." },
+      client: null,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    const error = expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    expect(error.details).toEqual({
+      reason: "canonical_audio_unsupported",
+      fallbackEligible: true,
     });
   });
 

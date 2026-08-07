@@ -1,4 +1,4 @@
-import type { SpeechVoiceOption } from "openclaw/plugin-sdk/speech-core";
+import { createProviderHttpError, type SpeechVoiceOption } from "openclaw/plugin-sdk/speech-core";
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 
 const DEFAULT_INWORLD_BASE_URL = "https://api.inworld.ai";
@@ -89,8 +89,7 @@ export async function inworldTTS(params: {
 
   try {
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
-      throw new Error(`Inworld TTS API error (${response.status}): ${errorBody}`);
+      throw await createProviderHttpError(response, "Inworld TTS API error");
     }
 
     const body = await response.text();
@@ -158,8 +157,7 @@ export async function listInworldVoices(params: {
 
   try {
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
-      throw new Error(`Inworld voices API error (${response.status}): ${errorBody}`);
+      throw await createProviderHttpError(response, "Inworld voices API error");
     }
 
     const json = (await response.json()) as {
