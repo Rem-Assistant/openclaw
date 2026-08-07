@@ -1933,11 +1933,12 @@ type SessionEntrySelection = {
   entries: SessionEntryPair[];
   totalCount: number;
   limitApplied?: number;
-  offsetApplied: number;
+  availableCount: number;
 };
 
 function compareSessionEntryPairsByUpdatedAt(a: SessionEntryPair, b: SessionEntryPair): number {
-  return (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0);
+  const updatedAtOrder = (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0);
+  return updatedAtOrder !== 0 ? updatedAtOrder : a[0].localeCompare(b[0]);
 }
 
 function resolveSessionsListLimit(
@@ -2102,13 +2103,22 @@ function selectSessionEntries(params: {
   const filtered = filterSessionEntries(params);
   const limit = resolveSessionsListLimit(params.opts, params.defaultLimit);
   const offset = resolveSessionsListOffset(params.opts);
+  const cursorUpdatedAt = params.opts.cursorUpdatedAt;
+  const cursorKey = params.opts.cursorKey;
+  const cursorEntry: SessionEntryPair | undefined =
+    typeof cursorUpdatedAt === "number" && Number.isFinite(cursorUpdatedAt) && cursorKey
+      ? [cursorKey, { updatedAt: cursorUpdatedAt } as SessionEntry]
+      : undefined;
+  const eligible = cursorEntry
+    ? filtered.filter((entry) => compareSessionEntryPairsByUpdatedAt(entry, cursorEntry) > 0)
+    : filtered;
   const selectionLimit = limit === undefined ? undefined : offset + limit;
-  const entries = sortAndLimitSessionEntries(filtered, selectionLimit).slice(offset);
+  const entries = sortAndLimitSessionEntries(eligible, selectionLimit).slice(offset);
   return {
     entries,
     totalCount: filtered.length,
     limitApplied: limit,
-    offsetApplied: offset,
+    availableCount: Math.max(0, eligible.length - offset),
   };
 }
 
@@ -2147,7 +2157,7 @@ export function listSessionsFromStore(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied, offsetApplied } = selection;
+  const { entries, totalCount, limitApplied, availableCount } = selection;
 
   const sessions = entries.map(([key, entry]) => {
     return buildGatewaySessionRow({
@@ -2172,7 +2182,7 @@ export function listSessionsFromStore(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: offsetApplied + sessions.length < totalCount,
+    hasMore: sessions.length < availableCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };
@@ -2214,7 +2224,7 @@ export async function listSessionsFromStoreAsync(params: {
     rowContext: hasSpawnedByFilter ? getRowContext() : undefined,
     defaultLimit: SESSIONS_LIST_DEFAULT_LIMIT,
   });
-  const { entries, totalCount, limitApplied, offsetApplied } = selection;
+  const { entries, totalCount, limitApplied, availableCount } = selection;
 
   const sessions = new Array<GatewaySessionRow>(entries.length);
   let nextEntryIndex = 0;
@@ -2276,7 +2286,7 @@ export async function listSessionsFromStoreAsync(params: {
     count: sessions.length,
     totalCount,
     limitApplied,
-    hasMore: offsetApplied + sessions.length < totalCount,
+    hasMore: sessions.length < availableCount,
     defaults: getSessionDefaults(cfg, params.modelCatalog, { allowPluginNormalization: false }),
     sessions,
   };

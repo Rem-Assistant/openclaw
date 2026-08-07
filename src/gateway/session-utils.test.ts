@@ -1437,6 +1437,67 @@ describe("listSessionsFromStore selected model display", () => {
     }
   });
 
+  test("keyset cursor avoids duplicate boundaries and exposes live-reorder drift", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-cursor-"));
+    try {
+      const storePath = path.join(tmpDir, "sessions.json");
+      const store: Record<string, SessionEntry> = {};
+      const now = Date.now();
+      for (let i = 0; i < 6; i += 1) {
+        const sessionId = `cursor-${i}`;
+        store[`agent:main:${sessionId}`] = { sessionId, updatedAt: now - i } as SessionEntry;
+        fs.writeFileSync(
+          path.join(tmpDir, `${sessionId}.jsonl`),
+          [
+            JSON.stringify({ type: "session", version: 1, id: sessionId }),
+            JSON.stringify({ message: { role: "user", content: `title ${i}` } }),
+          ].join("\n"),
+          "utf-8",
+        );
+      }
+
+      const first = await listSessionsFromStoreAsync({
+        cfg: createModelDefaultsConfig({ primary: "openai/gpt-5.4" }),
+        storePath,
+        store,
+        opts: { includeDerivedTitles: true, limit: 3 },
+      });
+      const boundary = first.sessions.at(-1);
+      expect(boundary?.key).toBe("agent:main:cursor-2");
+
+      // A not-yet-visited row moves ahead of the boundary between requests.
+      store["agent:main:cursor-4"] = {
+        ...store["agent:main:cursor-4"],
+        updatedAt: now + 1,
+      } as SessionEntry;
+
+      const second = await listSessionsFromStoreAsync({
+        cfg: createModelDefaultsConfig({ primary: "openai/gpt-5.4" }),
+        storePath,
+        store,
+        opts: {
+          includeDerivedTitles: true,
+          limit: 3,
+          cursorUpdatedAt: boundary?.updatedAt,
+          cursorKey: boundary?.key,
+        },
+      });
+
+      expect(second.sessions.map((row) => row.key)).toEqual([
+        "agent:main:cursor-3",
+        "agent:main:cursor-5",
+      ]);
+      // cursor-4 moved ahead of the boundary. The short aggregate (3 + 2)
+      // against totalCount 6 lets bounded clients restart one cumulative
+      // request instead of silently accepting an incomplete snapshot.
+      expect(first.sessions.length + second.sessions.length).toBe(5);
+      expect(second.totalCount).toBe(6);
+      expect(second.hasMore).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("uses bounded top-N selection for small limited lists", () => {
     const now = Date.now();
     const store: Record<string, SessionEntry> = {

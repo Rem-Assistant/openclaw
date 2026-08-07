@@ -45,6 +45,9 @@ export const SessionsListParamsSchema = Type.Object(
     limit: Type.Optional(Type.Integer({ minimum: 1 })),
     /** Zero-based page offset. Pair with a bounded `limit` for transcript enrichment. */
     offset: Type.Optional(Type.Integer({ minimum: 0 })),
+    /** Stable keyset cursor: both fields identify the final row of the previous page. */
+    cursorUpdatedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+    cursorKey: Type.Optional(NonEmptyString),
     activeMinutes: Type.Optional(Type.Integer({ minimum: 1 })),
     includeGlobal: Type.Optional(Type.Boolean()),
     includeUnknown: Type.Optional(Type.Boolean()),
