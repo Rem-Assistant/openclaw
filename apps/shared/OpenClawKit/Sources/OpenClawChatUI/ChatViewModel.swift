@@ -53,6 +53,8 @@ public final class OpenClawChatViewModel {
     private nonisolated(unsafe) var eventTask: Task<Void, Never>?
     @ObservationIgnored
     private nonisolated(unsafe) var bootstrapTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var activeSendTask: Task<Void, Never>?
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
@@ -68,6 +70,7 @@ public final class OpenClawChatViewModel {
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
     }
+    private var preparingRuns = Set<String>()
 
     @ObservationIgnored
     private nonisolated(unsafe) var pendingRunTimeoutTasks: [String: Task<Void, Never>] = [:]
@@ -128,6 +131,7 @@ public final class OpenClawChatViewModel {
     deinit {
         self.eventTask?.cancel()
         self.bootstrapTask?.cancel()
+        self.activeSendTask?.cancel()
         for (_, task) in self.pendingRunTimeoutTasks {
             task.cancel()
         }
@@ -142,7 +146,12 @@ public final class OpenClawChatViewModel {
     }
 
     public func send() {
-        Task { await self.performSend() }
+        guard self.activeSendTask == nil else { return }
+        self.activeSendTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performSend()
+            self.activeSendTask = nil
+        }
     }
 
     public func abort() {
@@ -167,6 +176,10 @@ public final class OpenClawChatViewModel {
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
+        // Composer state belongs to one conversation. Carrying a draft or attachment across a
+        // route change can leak it into the next chat and suppress that destination's prefill.
+        self.input = ""
+        self.attachments = []
         self.modelSelectionID = Self.defaultModelSelectionID
         self.startBootstrap()
     }
@@ -640,22 +653,21 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        let attachments = self.attachments
         self.isSending = true
         self.errorText = nil
         let runId = UUID().uuidString
-        let messageText = trimmed.isEmpty && !self.attachments.isEmpty ? "See attached." : trimmed
+        let messageText = trimmed.isEmpty && !attachments.isEmpty ? "See attached." : trimmed
         let thinkingLevel = self.thinkingLevel
         self.pendingRuns.insert(runId)
+        self.preparingRuns.insert(runId)
         self.armPendingRunTimeout(runId: runId)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
-
-        await self.transport.observeSendPreparation(
-            sessionKey: sessionKey,
-            idempotencyKey: runId,
-            phase: .started,
-            messageLength: messageText.count,
-            attachmentsCount: self.attachments.count)
+        defer {
+            self.preparingRuns.remove(runId)
+            self.isSending = false
+        }
 
         // Optimistically append user message to UI.
         var userContent: [OpenClawChatMessageContent] = [
@@ -671,7 +683,7 @@ public final class OpenClawChatViewModel {
                 name: nil,
                 arguments: nil),
         ]
-        let encodedAttachments = self.attachments.map { att -> OpenClawChatAttachmentPayload in
+        let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
             OpenClawChatAttachmentPayload(
                 type: att.type,
                 mimeType: att.mimeType,
@@ -698,14 +710,8 @@ public final class OpenClawChatViewModel {
                 role: "user",
                 content: userContent,
                 timestamp: Date().timeIntervalSince1970 * 1000))
-        await self.transport.observeSendPreparation(
-            sessionKey: sessionKey,
-            idempotencyKey: runId,
-            phase: .optimisticAppendCompleted,
-            messageLength: messageText.count,
-            attachmentsCount: encodedAttachments.count)
-
-        // Clear input immediately for responsive UX (before network await)
+        // Snapshot and clear the composer before the first suspension point. Diagnostic hooks
+        // must never cause a later continuation to erase a draft or attachment added meanwhile.
         self.input = ""
         self.attachments = []
 
@@ -713,16 +719,34 @@ public final class OpenClawChatViewModel {
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
+                phase: .started,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
+                phase: .optimisticAppendCompleted,
+                messageLength: messageText.count,
+                attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            await self.transport.observeSendPreparation(
+                sessionKey: sessionKey,
+                idempotencyKey: runId,
                 phase: .modelPatchWaitStarted,
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
             await self.waitForPendingModelPatches(in: sessionKey)
+            try Task.checkCancellation()
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
                 phase: .modelPatchWaitEnded,
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
+            try Task.checkCancellation()
+            self.preparingRuns.remove(runId)
             let response = try await self.transport.sendMessage(
                 sessionKey: sessionKey,
                 message: messageText,
@@ -734,22 +758,29 @@ public final class OpenClawChatViewModel {
                 self.pendingRuns.insert(response.runId)
                 self.armPendingRunTimeout(runId: response.runId)
             }
+        } catch is CancellationError {
+            self.clearPendingRun(runId)
         } catch {
             self.clearPendingRun(runId)
             self.errorText = error.localizedDescription
             chatUILogger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
         }
 
-        self.isSending = false
     }
 
     private func performAbort() async {
         guard !self.pendingRuns.isEmpty else { return }
         guard !self.isAborting else { return }
+        self.activeSendTask?.cancel()
         self.isAborting = true
         defer { self.isAborting = false }
 
         let runIds = Array(self.pendingRuns)
+        let preparingRunIds = runIds.filter { self.preparingRuns.contains($0) }
+        for runId in preparingRunIds {
+            self.preparingRuns.remove(runId)
+            self.clearPendingRun(runId)
+        }
         for runId in runIds {
             do {
                 try await self.transport.abortRun(sessionKey: self.sessionKey, runId: runId)

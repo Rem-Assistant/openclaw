@@ -300,6 +300,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
     private let setSessionThinkingHook: (@Sendable (String) async throws -> Void)?
+    private let sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)?
 
     private let stream: AsyncStream<OpenClawChatTransportEvent>
     private let continuation: AsyncStream<OpenClawChatTransportEvent>.Continuation
@@ -315,7 +316,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
-        setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil)
+        setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil,
+        sendPreparationHook: (@Sendable (OpenClawChatSendPreparationPhase) async -> Void)? = nil)
     {
         self.historyResponses = historyResponses
         self.historyRequestHook = historyRequestHook
@@ -328,6 +330,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.compactSessionHook = compactSessionHook
         self.setSessionModelHook = setSessionModelHook
         self.setSessionThinkingHook = setSessionThinkingHook
+        self.sendPreparationHook = sendPreparationHook
         var cont: AsyncStream<OpenClawChatTransportEvent>.Continuation!
         self.stream = AsyncStream { c in
             cont = c
@@ -379,6 +382,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         attachmentsCount _: Int
     ) async {
         await self.state.sendPreparationPhasesAppend(phase)
+        await self.sendPreparationHook?(phase)
     }
 
     func abortRun(sessionKey _: String, runId: String) async throws {
@@ -528,6 +532,28 @@ extension TestChatTransportState {
 }
 
 @Suite struct ChatViewModelTests {
+    @Test func sessionSwitchClearsConversationScopedComposerState() async {
+        let transport = TestChatTransport(historyResponses: [historyPayload(sessionKey: "other")])
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        await MainActor.run {
+            vm.input = "private draft"
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x01]),
+                    fileName: "private.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.switchSession(to: "other")
+        }
+
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.attachments.isEmpty })
+    }
+
     @Test func staleActiveSessionCompletionRetriesAndReassertsLatestKey() async throws {
         let aGate = AsyncGate()
         let aRequests = AsyncCounter()
@@ -1590,6 +1616,58 @@ extension TestChatTransportState {
             .modelPatchWaitEnded,
         ])
         #expect(await transport.sentThinkingLevels() == ["off"])
+    }
+
+    @Test func preparationObserverCannotEraseDraftTypedAfterSend() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "first")
+        try await waitUntil("preparation observer starts") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.input = "next draft" }
+        await gate.open()
+
+        try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
+        #expect(await MainActor.run { vm.input } == "next draft")
+    }
+
+    @Test func abortWhilePreparationObserverIsSuspendedNeverSends() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "cancel me")
+        try await waitUntil("preparation observer starts") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.abort() }
+        try await waitUntil("preparing run abort requested") {
+            await transport.abortedRunIds().count == 1
+        }
+        #expect(await MainActor.run { vm.pendingRunCount } == 0)
+
+        await gate.open()
+        try await waitUntil("cancelled preparation settles") {
+            await MainActor.run { !vm.isSending }
+        }
+        #expect(await transport.lastSentRunId() == nil)
     }
 
     @Test func failedLatestModelSelectionDoesNotReplayAfterOlderCompletionFinishes() async throws {
