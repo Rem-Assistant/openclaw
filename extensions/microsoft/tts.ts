@@ -18,42 +18,9 @@ type EdgeTTSRuntimeConfig = {
 
 type EdgeTTSDeps = {
   EdgeTTS: new (config: EdgeTTSRuntimeConfig) => {
-    ttsPromise: (text: string, outputPath: string) => Promise<unknown>;
+    ttsPromise: (text: string, outputPath: string, signal?: AbortSignal) => Promise<unknown>;
   };
 };
-
-async function waitForEdgeTtsResult(params: {
-  promise: Promise<unknown>;
-  signal?: AbortSignal;
-}): Promise<void> {
-  const signal = params.signal;
-  if (!signal) {
-    await params.promise;
-    return;
-  }
-  signal.throwIfAborted();
-  let wasAborted = false;
-  const onAbort = () => {
-    wasAborted = true;
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    // node-edge-tts exposes no cancellation handle. Do not race away and let
-    // the caller delete its workspace while the dependency is still writing.
-    // Wait for the provider to settle, then surface the caller's cancellation.
-    await params.promise;
-  } catch (error) {
-    if (wasAborted) {
-      throw signal.reason ?? new DOMException("Aborted", "AbortError");
-    }
-    throw error;
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
-  if (wasAborted) {
-    throw signal.reason ?? new DOMException("Aborted", "AbortError");
-  }
-}
 
 async function loadDefaultEdgeTTSDeps(): Promise<EdgeTTSDeps> {
   const { EdgeTTS } = await import("node-edge-tts");
@@ -140,10 +107,7 @@ export async function edgeTTS(
     const outputSize = await writeEdgeTtsOutput({
       outputPath,
       ttsPromise: async (tempPath) => {
-        await waitForEdgeTtsResult({
-          promise: tts.ttsPromise(text, tempPath),
-          signal: params.signal,
-        });
+        await tts.ttsPromise(text, tempPath, params.signal);
       },
     });
     if (outputSize > 0) {

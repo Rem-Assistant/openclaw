@@ -1,12 +1,14 @@
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { EdgeTTS } from "node-edge-tts";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 let edgeTTS: typeof import("./tts.js").edgeTTS;
 
 function createEdgeTTSDeps(
-  ttsPromise: (text: string, filePath: string) => Promise<void>,
+  ttsPromise: (text: string, filePath: string, signal?: AbortSignal) => Promise<void>,
   onConstruct?: () => void,
 ) {
   return {
@@ -15,8 +17,8 @@ function createEdgeTTSDeps(
         onConstruct?.();
       }
 
-      ttsPromise(text: string, filePath: string) {
-        return ttsPromise(text, filePath);
+      ttsPromise(text: string, filePath: string, signal?: AbortSignal) {
+        return ttsPromise(text, filePath, signal);
       }
     },
   };
@@ -28,6 +30,16 @@ const baseEdgeConfig = {
   outputFormat: "audio-24khz-48kbitrate-mono-mp3",
   saveSubtitles: false,
 };
+
+class FakeEdgeSocket extends EventEmitter {
+  sentMessages: unknown[] = [];
+  terminate = vi.fn();
+  close = vi.fn();
+
+  send(message: unknown) {
+    this.sentMessages.push(message);
+  }
+}
 
 describe("edgeTTS empty audio validation", () => {
   let tempDir: string | undefined;
@@ -191,19 +203,21 @@ describe("edgeTTS empty audio validation", () => {
     expect(calls).toEqual(["Hello"]);
   });
 
-  it("defers cancellation until the non-cancellable provider stops writing", async () => {
+  it("passes cancellation through to the provider", async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), "tts-test-"));
     const outputPath = path.join(tempDir, "voice.mp3");
     const controller = new AbortController();
     const calls: string[] = [];
-    let finishProvider: (() => void) | undefined;
-    const deps = createEdgeTTSDeps(async (text: string, filePath: string) => {
-      calls.push(text);
-      await new Promise<void>((resolve) => {
-        finishProvider = resolve;
-      });
-      writeFileSync(filePath, Buffer.from([0xff]));
-    });
+    let receivedSignal: AbortSignal | undefined;
+    const deps = createEdgeTTSDeps(
+      async (text: string, _filePath: string, signal?: AbortSignal) => {
+        calls.push(text);
+        receivedSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    );
 
     const pending = edgeTTS(
       {
@@ -216,10 +230,54 @@ describe("edgeTTS empty audio validation", () => {
       deps,
     );
     await vi.waitFor(() => expect(calls).toEqual(["Hello"]));
+    expect(receivedSignal).toBe(controller.signal);
     controller.abort(new Error("preview cancelled"));
-    finishProvider?.();
 
     await expect(pending).rejects.toThrow("preview cancelled");
     expect(calls).toEqual(["Hello"]);
+  });
+});
+
+describe("patched node-edge-tts cancellation", () => {
+  let tempDir: string | undefined;
+
+  afterEach(() => {
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("terminates the websocket and rejects promptly when aborted", async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "edge-provider-test-"));
+    const socket = new FakeEdgeSocket();
+    const provider = new EdgeTTS({ timeout: 10000 });
+    provider._connectWebSocket = async () => socket as never;
+    const controller = new AbortController();
+
+    const pending = provider.ttsPromise(
+      "Hello",
+      path.join(tempDir, "voice.mp3"),
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(socket.sentMessages).toHaveLength(1));
+    controller.abort(new Error("preview cancelled"));
+
+    await expect(pending).rejects.toThrow("preview cancelled");
+    expect(socket.terminate).toHaveBeenCalledOnce();
+    expect(socket.listenerCount("message")).toBe(0);
+  });
+
+  it("terminates the websocket when synthesis times out", async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "edge-provider-test-"));
+    const socket = new FakeEdgeSocket();
+    const provider = new EdgeTTS({ timeout: 5 });
+    provider._connectWebSocket = async () => socket as never;
+
+    await expect(provider.ttsPromise("Hello", path.join(tempDir, "voice.mp3"))).rejects.toThrow(
+      "Timed out",
+    );
+    expect(socket.terminate).toHaveBeenCalledOnce();
+    expect(socket.listenerCount("message")).toBe(0);
   });
 });
