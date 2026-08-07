@@ -9,7 +9,7 @@ vi.mock("../logging/subsystem.js", () => ({
   })),
 }));
 
-import { buildTimeoutAbortSignal } from "./fetch-timeout.js";
+import { buildTimeoutAbortSignal, fetchWithTimeout } from "./fetch-timeout.js";
 
 function requireWarnRecord(callIndex: number): Record<string, unknown> {
   const record = warn.mock.calls[callIndex]?.[1] as Record<string, unknown> | undefined;
@@ -181,5 +181,34 @@ describe("buildTimeoutAbortSignal", () => {
     expect(warn).toHaveBeenCalledTimes(1);
 
     cleanup();
+  });
+});
+
+describe("fetchWithTimeout", () => {
+  it("combines caller cancellation with its timeout signal", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const fetchFn = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener(
+          "abort",
+          () => reject(requestSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    });
+    const controller = new AbortController();
+
+    const pending = fetchWithTimeout(
+      "https://example.com/audio.mp3",
+      { signal: controller.signal },
+      30_000,
+      fetchFn,
+    );
+    await vi.waitFor(() => expect(requestSignal).toBeInstanceOf(AbortSignal));
+    controller.abort(new Error("preview cancelled"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignal?.aborted).toBe(true);
   });
 });

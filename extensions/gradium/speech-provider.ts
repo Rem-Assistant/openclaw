@@ -86,6 +86,7 @@ export function buildGradiumSpeechProvider(): SpeechProviderPlugin {
         voiceId: trimToUndefined(overrides.voiceId) ?? config.voiceId,
         outputFormat,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       return {
         audioBuffer,

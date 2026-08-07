@@ -312,6 +312,7 @@ export function buildOpenAISpeechProvider(): SpeechProviderPlugin {
         responseFormat,
         extraBody: config.extraBody,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       return {
         audioBuffer,

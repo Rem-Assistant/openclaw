@@ -82,6 +82,33 @@ describe("azure speech tts", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("forwards caller cancellation into the guarded request", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), {
+          once: true,
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const pending = azureSpeechTTS({
+      text: "hello",
+      apiKey: "speech-key",
+      region: "eastus",
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(requestSignal).toBeInstanceOf(AbortSignal));
+    controller.abort(new Error("preview cancelled"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("lists voices with timeout and filters deprecated entries", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

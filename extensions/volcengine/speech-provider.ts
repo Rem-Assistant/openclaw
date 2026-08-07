@@ -216,6 +216,7 @@ export function buildVolcengineSpeechProvider(): SpeechProviderPlugin {
         emotion: overrides.emotion ?? cfg.emotion,
         encoding,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
 
       return {

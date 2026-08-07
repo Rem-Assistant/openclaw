@@ -269,6 +269,7 @@ export function buildAzureSpeechProvider(): SpeechProviderPlugin {
         lang: overrides.lang ?? config.lang,
         outputFormat,
         timeoutMs: resolveTimeoutMs(config, req.timeoutMs),
+        signal: req.signal,
       });
       return {
         audioBuffer,

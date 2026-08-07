@@ -286,6 +286,7 @@ export function buildMinimaxSpeechProvider(): SpeechProviderPlugin {
         vol: overrides.vol ?? config.vol,
         pitch: overrides.pitch ?? config.pitch,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       if (req.target === "voice-note") {
         const opusBuffer = await transcodeAudioBufferToOpus({

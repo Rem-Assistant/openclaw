@@ -123,6 +123,7 @@ export function buildVydraSpeechProvider(): SpeechProviderPlugin {
         fetchFn,
         allowPrivateNetwork,
         dispatcherPolicy,
+        signal: req.signal,
       });
 
       try {
@@ -137,6 +138,7 @@ export function buildVydraSpeechProvider(): SpeechProviderPlugin {
           kind: "audio",
           timeoutMs: req.timeoutMs,
           fetchFn,
+          signal: req.signal,
         });
         return {
           audioBuffer: audio.buffer,

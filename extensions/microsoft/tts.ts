@@ -22,6 +22,30 @@ type EdgeTTSDeps = {
   };
 };
 
+async function waitForEdgeTtsResult(params: {
+  promise: Promise<unknown>;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const signal = params.signal;
+  if (!signal) {
+    await params.promise;
+    return;
+  }
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    await Promise.race([params.promise, aborted]);
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
 async function loadDefaultEdgeTTSDeps(): Promise<EdgeTTSDeps> {
   const { EdgeTTS } = await import("node-edge-tts");
   return { EdgeTTS };
@@ -80,10 +104,12 @@ export async function edgeTTS(
       timeoutMs?: number;
     };
     timeoutMs: number;
+    signal?: AbortSignal;
   },
   deps?: EdgeTTSDeps,
 ): Promise<void> {
   const { text, outputPath, config, timeoutMs } = params;
+  params.signal?.throwIfAborted();
   if (text.trim().length === 0) {
     throw new Error("Microsoft TTS text cannot be empty");
   }
@@ -105,7 +131,10 @@ export async function edgeTTS(
     const outputSize = await writeEdgeTtsOutput({
       outputPath,
       ttsPromise: async (tempPath) => {
-        await tts.ttsPromise(text, tempPath);
+        await waitForEdgeTtsResult({
+          promise: tts.ttsPromise(text, tempPath),
+          signal: params.signal,
+        });
       },
     });
     if (outputSize > 0) {

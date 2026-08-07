@@ -205,10 +205,11 @@ export async function downloadVydraAsset(params: {
   kind: VydraMediaKind;
   timeoutMs?: number;
   fetchFn: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<{ buffer: Buffer; mimeType: string; fileName: string }> {
   const response = await fetchWithTimeout(
     params.url,
-    { method: "GET" },
+    { method: "GET", signal: params.signal },
     params.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS,
     params.fetchFn,
   );

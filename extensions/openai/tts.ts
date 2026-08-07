@@ -100,6 +100,7 @@ export async function openaiTTS(params: {
   responseFormat: "mp3" | "opus" | "pcm" | "wav";
   extraBody?: Record<string, unknown>;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const {
     text,
@@ -154,6 +155,7 @@ export async function openaiTTS(params: {
       body: requestBody,
     },
     timeoutMs,
+    signal: params.signal,
     policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(baseUrl),
     capture: false,
     pinDns: debugProxyFetchPatchInstalled ? false : undefined,

@@ -18,6 +18,7 @@ import { inworldTTS, listInworldVoices } from "./tts.js";
 type GuardRequest = {
   url: string;
   init?: RequestInit;
+  signal?: AbortSignal;
   auditContext?: string;
   policy?: unknown;
   timeoutMs?: number;
@@ -100,7 +101,7 @@ describe("Inworld guarded dispatcher lifecycle", () => {
 
     await inworldTTS({ text: "cancel me", apiKey: "test-key", signal: controller.signal });
 
-    expect(lastGuardRequest().init?.signal).toBe(controller.signal);
+    expect(lastGuardRequest().signal).toBe(controller.signal);
   });
 });
 

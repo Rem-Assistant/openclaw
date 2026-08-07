@@ -82,9 +82,9 @@ export async function inworldTTS(params: {
         Authorization: `Basic ${params.apiKey}`,
       },
       body: requestBody,
-      signal: params.signal,
     },
     timeoutMs: params.timeoutMs,
+    signal: params.signal,
     policy: ssrfPolicyFromInworldBaseUrl(baseUrl),
     auditContext: "inworld-tts",
   });

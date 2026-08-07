@@ -175,6 +175,7 @@ export async function azureSpeechTTS(params: {
   lang?: string;
   outputFormat?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const voice = trimToUndefined(params.voice) ?? DEFAULT_AZURE_SPEECH_VOICE;
   const outputFormat = trimToUndefined(params.outputFormat) ?? DEFAULT_AZURE_SPEECH_AUDIO_FORMAT;
@@ -196,6 +197,7 @@ export async function azureSpeechTTS(params: {
       }),
     },
     timeoutMs: params.timeoutMs,
+    signal: params.signal,
     policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(url),
     auditContext: "azure-speech.tts",
   });

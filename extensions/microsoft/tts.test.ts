@@ -190,4 +190,31 @@ describe("edgeTTS empty audio validation", () => {
     ).rejects.toThrow("upstream timeout");
     expect(calls).toEqual(["Hello"]);
   });
+
+  it("rejects an in-flight synthesis when the caller cancels", async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "tts-test-"));
+    const outputPath = path.join(tempDir, "voice.mp3");
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const deps = createEdgeTTSDeps(async (text: string) => {
+      calls.push(text);
+      return await new Promise<void>(() => {});
+    });
+
+    const pending = edgeTTS(
+      {
+        text: "Hello",
+        outputPath,
+        config: baseEdgeConfig,
+        timeoutMs: 10000,
+        signal: controller.signal,
+      },
+      deps,
+    );
+    await vi.waitFor(() => expect(calls).toEqual(["Hello"]));
+    controller.abort(new Error("preview cancelled"));
+
+    await expect(pending).rejects.toThrow("preview cancelled");
+    expect(calls).toEqual(["Hello"]);
+  });
 });

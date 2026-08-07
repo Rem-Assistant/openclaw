@@ -203,39 +203,33 @@ async function xiaomiTTS(params: {
   format: XiaomiTtsFormat;
   style?: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const { text, apiKey, baseUrl, model, voice, format, style, timeoutMs } = params;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const { response, release } = await fetchWithSsrFGuard({
-      url: `${baseUrl}/chat/completions`,
-      init: {
-        method: "POST",
-        headers: {
-          "api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: buildXiaomiTtsMessages({ text, style }),
-          audio: { format, voice },
-        }),
-        signal: controller.signal,
+  const { response, release } = await fetchWithSsrFGuard({
+    url: `${baseUrl}/chat/completions`,
+    init: {
+      method: "POST",
+      headers: {
+        "api-key": apiKey,
+        "Content-Type": "application/json",
       },
-      timeoutMs,
-      policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(baseUrl),
-      auditContext: "xiaomi.tts",
-    });
-    try {
-      await assertOkOrThrowProviderError(response, "Xiaomi TTS API error");
-      return decodeXiaomiAudioData(await response.json());
-    } finally {
-      await release();
-    }
+      body: JSON.stringify({
+        model,
+        messages: buildXiaomiTtsMessages({ text, style }),
+        audio: { format, voice },
+      }),
+    },
+    timeoutMs,
+    signal: params.signal,
+    policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(baseUrl),
+    auditContext: "xiaomi.tts",
+  });
+  try {
+    await assertOkOrThrowProviderError(response, "Xiaomi TTS API error");
+    return decodeXiaomiAudioData(await response.json());
   } finally {
-    clearTimeout(timeout);
+    await release();
   }
 }
 
@@ -269,6 +263,7 @@ export function buildXiaomiSpeechProvider(): SpeechProviderPlugin {
         format: outputFormat,
         style: overrides.style ?? config.style,
         timeoutMs: req.timeoutMs,
+        signal: req.signal,
       });
       if (req.target === "voice-note") {
         const opusBuffer = await transcodeAudioBufferToOpus({

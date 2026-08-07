@@ -48,6 +48,7 @@ export async function xaiTTS(params: {
   speed?: number;
   responseFormat?: "mp3" | "wav" | "pcm" | "mulaw" | "alaw";
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const {
     text,
@@ -81,6 +82,7 @@ export async function xaiTTS(params: {
       ...(speed != null && { speed }),
     },
     timeoutMs,
+    signal: params.signal,
     fetchFn: fetch,
     auditContext: "xai tts",
   });

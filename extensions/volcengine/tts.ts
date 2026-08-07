@@ -19,6 +19,7 @@ type VolcengineTTSParams = {
   emotion?: string;
   encoding?: VolcengineTtsEncoding;
   timeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 const DEFAULT_SEED_VOICE = "en_female_anna_mars_bigtts";
@@ -152,6 +153,7 @@ async function seedSpeechTTS(params: VolcengineTTSParams & { apiKey: string }): 
       body: payload,
     },
     timeoutMs,
+    signal: params.signal,
     policy: { hostnameAllowlist: hostnameAllowlist(baseUrl) },
     auditContext: "volcengine.tts",
   });
@@ -234,6 +236,7 @@ async function legacyVolcengineTTS(
       body: payload,
     },
     timeoutMs,
+    signal: params.signal,
     policy: { hostnameAllowlist: hostnameAllowlist(baseUrl) },
     auditContext: "volcengine.tts",
   });
