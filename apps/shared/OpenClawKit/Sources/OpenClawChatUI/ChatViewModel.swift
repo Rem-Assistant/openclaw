@@ -59,6 +59,11 @@ public final class OpenClawChatViewModel {
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
     private var queuedSessionKeyAfterSend: String?
+    private struct ComposerDraft {
+        var input: String
+        var attachments: [OpenClawPendingAttachment]
+    }
+    private var composerDraftsBySession: [String: ComposerDraft] = [:]
     private var sessionRefreshCount = 0
     private var nextSessionListRequestID: UInt64 = 0
     private var appliedSessionListRequestID: UInt64 = 0
@@ -173,25 +178,35 @@ public final class OpenClawChatViewModel {
     public func switchSession(to sessionKey: String) {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
-        guard next != self.sessionKey else { return }
         // Once Send is accepted, finish preparation and transport acknowledgement against the
         // captured conversation before changing the shared transcript. This prevents both silent
         // message loss and old-run activity from appearing in the destination during bootstrap.
         if self.isSending {
-            self.queuedSessionKeyAfterSend = next
+            // The latest tap is authoritative. Returning to the source conversation cancels an
+            // earlier queued destination instead of unexpectedly navigating after Send settles.
+            self.queuedSessionKeyAfterSend = next == self.sessionKey ? nil : next
             return
         }
+        guard next != self.sessionKey else { return }
         self.performSessionSwitch(to: next)
     }
 
     private func performSessionSwitch(to next: String) {
+        if self.input.isEmpty, self.attachments.isEmpty {
+            self.composerDraftsBySession[self.sessionKey] = nil
+        } else {
+            self.composerDraftsBySession[self.sessionKey] = ComposerDraft(
+                input: self.input,
+                attachments: self.attachments)
+        }
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
         // Composer state belongs to one conversation. Carrying a draft or attachment across a
         // route change can leak it into the next chat and suppress that destination's prefill.
-        self.input = ""
-        self.attachments = []
+        let destinationDraft = self.composerDraftsBySession[next]
+        self.input = destinationDraft?.input ?? ""
+        self.attachments = destinationDraft?.attachments ?? []
         self.modelSelectionID = Self.defaultModelSelectionID
         self.startBootstrap()
     }
@@ -669,7 +684,6 @@ public final class OpenClawChatViewModel {
         let attachments = self.attachments
         let sessionRequest = self.currentSessionRequest()
         let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
-        var sendWasAccepted = false
         self.isSending = true
         self.errorText = nil
         let runId = UUID().uuidString
@@ -689,9 +703,7 @@ public final class OpenClawChatViewModel {
             self.isSending = false
             if let queuedSessionKey = self.queuedSessionKeyAfterSend {
                 self.queuedSessionKeyAfterSend = nil
-                if sendWasAccepted {
-                    self.performSessionSwitch(to: queuedSessionKey)
-                }
+                self.performSessionSwitch(to: queuedSessionKey)
             }
         }
 
@@ -781,7 +793,6 @@ public final class OpenClawChatViewModel {
                 thinking: thinkingLevel,
                 idempotencyKey: runId,
                 attachments: encodedAttachments)
-            sendWasAccepted = true
             if response.runId != runId {
                 self.clearPendingRun(runId)
                 self.pendingRuns.insert(response.runId)
@@ -799,6 +810,14 @@ public final class OpenClawChatViewModel {
             }
             self.clearPendingRun(runId)
         } catch {
+            self.messages.removeAll { $0.id == optimisticMessageID }
+            if self.isCurrentSessionRequest(sessionRequest),
+               self.input.isEmpty,
+               self.attachments.isEmpty
+            {
+                self.input = composerInput
+                self.attachments = attachments
+            }
             self.clearPendingRun(runId)
             if self.isCurrentSessionRequest(sessionRequest) {
                 self.errorText = error.localizedDescription
@@ -1490,11 +1509,16 @@ public final class OpenClawChatViewModel {
     }
 
     private func handleAgentEvent(_ evt: OpenClawAgentEventPayload) {
-        // During a session bootstrap there is no authoritative run identity for the destination.
-        // Reject rather than letting a finishing run from the previous conversation populate it.
-        guard let sessionId else { return }
-        if evt.runId != sessionId {
-            return
+        // A destination bootstrap is not yet authoritative, so a finishing event from the prior
+        // conversation must not populate it. A stable brand-new conversation legitimately has no
+        // session ID until its first agent event; bind that ID only while our own first run is
+        // pending and the transport has confirmed the active session key.
+        guard !self.isLoading, self.confirmedActiveSessionKey == self.sessionKey else { return }
+        if let sessionId {
+            guard evt.runId == sessionId else { return }
+        } else {
+            guard !self.pendingRuns.isEmpty else { return }
+            self.sessionId = evt.runId
         }
 
         switch evt.stream {
