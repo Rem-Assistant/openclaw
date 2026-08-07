@@ -173,6 +173,13 @@ public final class OpenClawChatViewModel {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         guard next != self.sessionKey else { return }
+        if !self.preparingRuns.isEmpty {
+            self.activeSendTask?.cancel()
+            for runId in self.preparingRuns {
+                self.clearPendingRun(runId)
+            }
+            self.preparingRuns.removeAll()
+        }
         self.sessionGeneration &+= 1
         self.sessionKey = next
         self.confirmedActiveSessionKey = nil
@@ -653,7 +660,10 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        let composerInput = self.input
         let attachments = self.attachments
+        let sessionRequest = self.currentSessionRequest()
+        let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         self.isSending = true
         self.errorText = nil
         let runId = UUID().uuidString
@@ -673,78 +683,85 @@ public final class OpenClawChatViewModel {
             self.isSending = false
         }
 
+        // Append without awaiting diagnostics so clearing the composer always has immediate,
+        // visible feedback. The captured monotonic start still includes encoding and UI work.
+        var userContent: [OpenClawChatMessageContent] = [
+            OpenClawChatMessageContent(
+                type: "text",
+                text: messageText,
+                thinking: nil,
+                thinkingSignature: nil,
+                mimeType: nil,
+                fileName: nil,
+                content: nil,
+                id: nil,
+                name: nil,
+                arguments: nil),
+        ]
+        let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
+            OpenClawChatAttachmentPayload(
+                type: att.type,
+                mimeType: att.mimeType,
+                fileName: att.fileName,
+                content: att.data.base64EncodedString())
+        }
+        for att in encodedAttachments {
+            userContent.append(
+                OpenClawChatMessageContent(
+                    type: att.type,
+                    text: nil,
+                    thinking: nil,
+                    thinkingSignature: nil,
+                    mimeType: att.mimeType,
+                    fileName: att.fileName,
+                    content: AnyCodable(att.content),
+                    id: nil,
+                    name: nil,
+                    arguments: nil))
+        }
+        let optimisticMessageID = UUID()
+        self.messages.append(
+            OpenClawChatMessage(
+                id: optimisticMessageID,
+                role: "user",
+                content: userContent,
+                timestamp: Date().timeIntervalSince1970 * 1000))
+
         do {
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
                 phase: .started,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
                 messageLength: messageText.count,
-                attachmentsCount: attachments.count)
+                attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
-
-            // Optimistically append the user message after the start marker so attachment
-            // encoding and UI mutation are included in measured preparation time.
-            var userContent: [OpenClawChatMessageContent] = [
-                OpenClawChatMessageContent(
-                    type: "text",
-                    text: messageText,
-                    thinking: nil,
-                    thinkingSignature: nil,
-                    mimeType: nil,
-                    fileName: nil,
-                    content: nil,
-                    id: nil,
-                    name: nil,
-                    arguments: nil),
-            ]
-            let encodedAttachments = attachments.map { att -> OpenClawChatAttachmentPayload in
-                OpenClawChatAttachmentPayload(
-                    type: att.type,
-                    mimeType: att.mimeType,
-                    fileName: att.fileName,
-                    content: att.data.base64EncodedString())
-            }
-            for att in encodedAttachments {
-                userContent.append(
-                    OpenClawChatMessageContent(
-                        type: att.type,
-                        text: nil,
-                        thinking: nil,
-                        thinkingSignature: nil,
-                        mimeType: att.mimeType,
-                        fileName: att.fileName,
-                        content: AnyCodable(att.content),
-                        id: nil,
-                        name: nil,
-                        arguments: nil))
-            }
-            self.messages.append(
-                OpenClawChatMessage(
-                    id: UUID(),
-                    role: "user",
-                    content: userContent,
-                    timestamp: Date().timeIntervalSince1970 * 1000))
-
+            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
                 phase: .optimisticAppendCompleted,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
+            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
                 phase: .modelPatchWaitStarted,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
             await self.waitForPendingModelPatches(in: sessionKey)
             try Task.checkCancellation()
+            guard self.isCurrentSessionRequest(sessionRequest) else { throw CancellationError() }
             await self.transport.observeSendPreparation(
                 sessionKey: sessionKey,
                 idempotencyKey: runId,
                 phase: .modelPatchWaitEnded,
+                startedAtUptimeNanoseconds: preparationStartedAtUptimeNanoseconds,
                 messageLength: messageText.count,
                 attachmentsCount: encodedAttachments.count)
             try Task.checkCancellation()
@@ -761,6 +778,11 @@ public final class OpenClawChatViewModel {
                 self.armPendingRunTimeout(runId: response.runId)
             }
         } catch is CancellationError {
+            self.messages.removeAll { $0.id == optimisticMessageID }
+            if self.isCurrentSessionRequest(sessionRequest) {
+                if self.input.isEmpty { self.input = composerInput }
+                if self.attachments.isEmpty { self.attachments = attachments }
+            }
             self.clearPendingRun(runId)
         } catch {
             self.clearPendingRun(runId)

@@ -34,6 +34,7 @@ public protocol OpenClawChatTransport: Sendable {
         sessionKey: String,
         idempotencyKey: String,
         phase: OpenClawChatSendPreparationPhase,
+        startedAtUptimeNanoseconds: UInt64,
         messageLength: Int,
         attachmentsCount: Int) async
 
@@ -55,6 +56,7 @@ extension OpenClawChatTransport {
         sessionKey _: String,
         idempotencyKey _: String,
         phase _: OpenClawChatSendPreparationPhase,
+        startedAtUptimeNanoseconds _: UInt64,
         messageLength _: Int,
         attachmentsCount _: Int) async {}
 

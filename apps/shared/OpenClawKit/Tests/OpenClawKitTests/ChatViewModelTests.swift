@@ -384,6 +384,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         sessionKey _: String,
         idempotencyKey _: String,
         phase: OpenClawChatSendPreparationPhase,
+        startedAtUptimeNanoseconds _: UInt64,
         messageLength _: Int,
         attachmentsCount _: Int
     ) async {
@@ -1647,7 +1648,7 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.input } == "next draft")
     }
 
-    @Test func optimisticAppendOccursBetweenPreparationMarkers() async throws {
+    @Test func optimisticAppendIsVisibleBeforePreparationObserverSuspends() async throws {
         let startedGate = AsyncGate()
         let completedGate = AsyncGate()
         let transport = TestChatTransport(
@@ -1666,7 +1667,7 @@ extension TestChatTransportState {
             await transport.sendPreparationPhases() == [.started]
         }
         #expect(await MainActor.run { vm.input.isEmpty })
-        #expect(await MainActor.run { vm.messages.allSatisfy { $0.role != "user" } })
+        #expect(await MainActor.run { vm.messages.contains { $0.role == "user" } })
 
         await startedGate.open()
         try await waitUntil("send reaches optimistic append marker") {
@@ -1676,6 +1677,34 @@ extension TestChatTransportState {
 
         await completedGate.open()
         try await waitUntil("send completes") { await transport.lastSentRunId() != nil }
+    }
+
+    @Test func switchingSessionDuringPreparationCannotLeakOrSendOldMessage() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "private to main")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run { vm.switchSession(to: "other") }
+        await gate.open()
+
+        try await waitUntil("other session loads") {
+            await MainActor.run { vm.sessionKey == "other" && !vm.isLoading && !vm.isSending }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.messages.allSatisfy { message in
+            !message.content.contains { $0.text == "private to main" }
+        } })
     }
 
     @Test func abortWhilePreparationObserverIsSuspendedNeverSends() async throws {
@@ -1738,6 +1767,8 @@ extension TestChatTransportState {
             await MainActor.run { !vm.isSending && vm.pendingRunCount == 0 }
         }
         #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.messages.allSatisfy { $0.role != "user" } })
+        #expect(await MainActor.run { vm.input } == "cancel model wait")
         await modelGate.open()
     }
 
