@@ -1736,6 +1736,80 @@ extension TestChatTransportState {
         #expect(await transport.lastSentRunId() == nil)
     }
 
+    @Test func cancellationDoesNotMixOldAttachmentIntoNewTextDraft() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "old text"
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x01]),
+                    fileName: "old-private.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.send()
+        }
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.input = "new draft"
+            vm.abort()
+        }
+        try await waitUntil("abort requested") { await transport.abortedRunIds().count == 1 }
+        await gate.open()
+        try await waitUntil("cancelled send settles") { await MainActor.run { !vm.isSending } }
+
+        #expect(await MainActor.run { vm.input } == "new draft")
+        #expect(await MainActor.run { vm.attachments.isEmpty })
+    }
+
+    @Test func cancellationDoesNotMixOldTextIntoNewAttachmentDraft() async throws {
+        let gate = AsyncGate()
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "old text")
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data([0x02]),
+                    fileName: "new-only.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.abort()
+        }
+        try await waitUntil("abort requested") { await transport.abortedRunIds().count == 1 }
+        await gate.open()
+        try await waitUntil("cancelled send settles") { await MainActor.run { !vm.isSending } }
+
+        #expect(await MainActor.run { vm.input.isEmpty })
+        #expect(await MainActor.run { vm.attachments.map(\.fileName) } == ["new-only.txt"])
+    }
+
     @Test func abortWhileWaitingForModelPatchSettlesWithoutSending() async throws {
         let modelGate = AsyncGate()
         let now = Date().timeIntervalSince1970 * 1000

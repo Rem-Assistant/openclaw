@@ -780,8 +780,12 @@ public final class OpenClawChatViewModel {
         } catch is CancellationError {
             self.messages.removeAll { $0.id == optimisticMessageID }
             if self.isCurrentSessionRequest(sessionRequest) {
-                if self.input.isEmpty { self.input = composerInput }
-                if self.attachments.isEmpty { self.attachments = attachments }
+                // Restore the captured composer as one unit only when the user has not started a
+                // replacement draft. Mixing old text or attachments with new work can leak data.
+                if self.input.isEmpty, self.attachments.isEmpty {
+                    self.input = composerInput
+                    self.attachments = attachments
+                }
             }
             self.clearPendingRun(runId)
         } catch {
