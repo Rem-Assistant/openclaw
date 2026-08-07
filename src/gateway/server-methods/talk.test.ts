@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ProviderHttpError } from "../../agents/provider-http-errors.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeResolvedSecretInputString } from "../../config/types.secrets.js";
 import { ErrorCodes } from "../protocol/index.js";
@@ -304,6 +305,8 @@ describe("talk.voices handler", () => {
     mocks.getSpeechProvider.mockReturnValue({
       id: "acme",
       label: "Acme Speech",
+      listVoices: vi.fn(),
+      isConfigured: () => true,
       resolveTalkConfig: ({
         talkProviderConfig,
       }: {
@@ -370,8 +373,74 @@ describe("talk.voices handler", () => {
       context: { getRuntimeConfig: () => ({}) as OpenClawConfig } as never,
     });
 
-    expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    const error = expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    expect(error.details).toEqual({ reason: "provider_not_configured" });
     expect(mocks.listSpeechVoices).not.toHaveBeenCalled();
+  });
+
+  it("emits structured unsupported capability recovery from the real handler", async () => {
+    const runtimeConfig = createTalkConfig("secret-key");
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      isConfigured: () => true,
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    });
+    const respond = vi.fn();
+
+    await talkHandlers["talk.voices"]({
+      req: { type: "req", id: "voices-unsupported", method: "talk.voices" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    const error = expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    expect(error.details).toEqual({ reason: "provider_unsupported" });
+    expect(mocks.listSpeechVoices).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [401, "provider_authentication"],
+    [402, "provider_quota"],
+    [429, "provider_rate_limited"],
+    [422, "provider_configuration"],
+    [503, "provider_transient"],
+  ])("maps provider HTTP %i to structured reason %s", async (status, reason) => {
+    const runtimeConfig = createTalkConfig("secret-key");
+    mocks.getSpeechProvider.mockReturnValue({
+      id: "acme",
+      label: "Acme Speech",
+      listVoices: vi.fn(),
+      isConfigured: () => true,
+      resolveTalkConfig: ({
+        talkProviderConfig,
+      }: {
+        talkProviderConfig: Record<string, unknown>;
+      }) => talkProviderConfig,
+    });
+    mocks.listSpeechVoices.mockRejectedValue(
+      new ProviderHttpError({ message: "provider request failed", status }),
+    );
+    const respond = vi.fn();
+
+    await talkHandlers["talk.voices"]({
+      req: { type: "req", id: `voices-${status}`, method: "talk.voices" },
+      params: {},
+      client: { connect: { scopes: ["operator.read"] } } as never,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    const error = expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+    expect(error.details).toEqual({ reason });
   });
 });
 
@@ -505,8 +574,37 @@ describe("talk.speak handler", () => {
       respond: repeatRespond as never,
       context: {} as never,
     });
-    expectRespondOk(repeatRespond, { ok: true, cancelled: false });
+    expectRespondOk(repeatRespond, { ok: true, cancelled: true });
     expectRespondError(speakRespond, { code: ErrorCodes.UNAVAILABLE });
+  });
+
+  it("rejects a reversed-order speak before provider synthesis after cancel is acknowledged", async () => {
+    const runtimeConfig = createTalkConfig("env-acme-key");
+    const client = { connId: "conn-a", connect: { role: "operator" } } as never;
+    const cancelRespond = vi.fn();
+    await talkHandlers["talk.speak.cancel"]({
+      req: { type: "req", id: "cancel-first", method: "talk.speak.cancel" },
+      params: { previewId: "preview-race" },
+      client,
+      isWebchatConnect: () => false,
+      respond: cancelRespond as never,
+      context: {} as never,
+    });
+
+    const speakRespond = vi.fn();
+    await talkHandlers["talk.speak"]({
+      req: { type: "req", id: "speak-late", method: "talk.speak" },
+      params: { text: "This must never be billed.", previewId: "preview-race" },
+      client,
+      isWebchatConnect: () => false,
+      respond: speakRespond as never,
+      context: { getRuntimeConfig: () => runtimeConfig } as never,
+    });
+
+    expectRespondOk(cancelRespond, { ok: true, cancelled: true });
+    expectRespondError(speakRespond, { code: ErrorCodes.UNAVAILABLE });
+    expect(mocks.getSpeechProvider).not.toHaveBeenCalled();
+    expect(mocks.synthesizeSpeech).not.toHaveBeenCalled();
   });
 });
 

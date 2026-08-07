@@ -129,22 +129,40 @@ export function formatProviderHttpErrorMessage(params: {
   );
 }
 
+/** Structured provider HTTP failure for callers that need machine recovery. */
+export class ProviderHttpError extends Error {
+  readonly status: number;
+  readonly detail?: string;
+  readonly requestId?: string;
+
+  constructor(params: { message: string; status: number; detail?: string; requestId?: string }) {
+    super(params.message);
+    this.name = "ProviderHttpError";
+    this.status = params.status;
+    this.detail = params.detail;
+    this.requestId = params.requestId;
+  }
+}
+
 export async function createProviderHttpError(
   response: Response,
   label: string,
   options?: { statusPrefix?: string },
-): Promise<Error> {
+): Promise<ProviderHttpError> {
   const detail = await extractProviderErrorDetail(response);
   const requestId = extractProviderRequestId(response);
-  return new Error(
-    formatProviderHttpErrorMessage({
+  return new ProviderHttpError({
+    message: formatProviderHttpErrorMessage({
       label,
       status: response.status,
       detail,
       requestId,
       statusPrefix: options?.statusPrefix,
     }),
-  );
+    status: response.status,
+    detail,
+    requestId,
+  });
 }
 
 export async function assertOkOrThrowProviderError(
