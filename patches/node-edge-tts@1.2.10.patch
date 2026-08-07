@@ -14,7 +14,7 @@ index 5d71514227e3f5d28b6f707ec7881c193a842975..ef0fe5736c3369fb1d0ae3cbe40bbe79
  }
  export { EdgeTTS };
 diff --git a/dist/edge-tts.js b/dist/edge-tts.js
-index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979b0931a7b 100644
+index fc6c84090696e013411686f4ef1d394248f9be97..a038017813fa55bba6ef80b9f80b906e0ac032bd 100644
 --- a/dist/edge-tts.js
 +++ b/dist/edge-tts.js
 @@ -30,7 +30,7 @@ class EdgeTTS {
@@ -26,7 +26,7 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
          const wsConnect = new ws_1.WebSocket(`wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${drm_1.TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${(0, drm_1.generateSecMsGecToken)()}&Sec-MS-GEC-Version=1-${drm_1.CHROMIUM_FULL_VERSION}`, {
              host: 'speech.platform.bing.com',
              origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
-@@ -44,8 +44,27 @@ class EdgeTTS {
+@@ -44,8 +44,28 @@ class EdgeTTS {
              agent: this.proxy ? new https_proxy_agent_1.HttpsProxyAgent(this.proxy) : undefined
          });
          return new Promise((resolve, reject) => {
@@ -43,6 +43,7 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
 +                    return;
 +                settled = true;
 +                cleanup();
++                wsConnect.on('error', () => { });
 +                wsConnect.terminate();
 +                reject(error);
 +            };
@@ -56,7 +57,7 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
            {
              "context": {
                "synthesis": {
-@@ -60,11 +79,21 @@ class EdgeTTS {
+@@ -60,11 +80,21 @@ class EdgeTTS {
              }
            }
          `);
@@ -82,24 +83,35 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
          });
      }
      _saveSubFile(subFile, text, audioPath) {
-@@ -91,13 +120,54 @@ class EdgeTTS {
+@@ -91,13 +121,69 @@ class EdgeTTS {
          });
          (0, node_fs_1.writeFileSync)(subPath, JSON.stringify(subFile, null, '  '), { encoding: 'utf-8' });
      }
 -    async ttsPromise(text, audioPath) {
 -        const _wsConnect = await this._connectWebSocket();
+-        return new Promise((resolve, reject) => {
 +    async ttsPromise(text, audioPath, signal) {
 +        signal?.throwIfAborted();
-+        const _wsConnect = await this._connectWebSocket(signal);
-         return new Promise((resolve, reject) => {
++        const lifecycleController = new AbortController();
++        const onCallerAbort = () => lifecycleController.abort(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
++        const lifecycleTimeout = setTimeout(() => lifecycleController.abort(new Error('Timed out')), this.timeout);
++        signal?.addEventListener('abort', onCallerAbort, { once: true });
++        if (signal?.aborted) {
++            onCallerAbort();
++        }
++        const lifecycleSignal = lifecycleController.signal;
++        try {
++            lifecycleSignal.throwIfAborted();
++            const _wsConnect = await this._connectWebSocket(lifecycleSignal);
++            return await new Promise((resolve, reject) => {
              let audioStream = (0, node_fs_1.createWriteStream)(audioPath);
              let subFile = [];
 -            let timeout = setTimeout(() => reject('Timed out'), this.timeout);
 -            _wsConnect.on('message', async (data, isBinary) => {
 +            let settled = false;
++            let turnEnded = false;
 +            const cleanup = () => {
-+                clearTimeout(timeout);
-+                signal?.removeEventListener('abort', onAbort);
++                lifecycleSignal.removeEventListener('abort', onAbort);
 +                _wsConnect.removeListener('message', onMessage);
 +                _wsConnect.removeListener('error', onSocketError);
 +                _wsConnect.removeListener('close', onSocketClose);
@@ -111,6 +123,7 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
 +                settled = true;
 +                cleanup();
 +                audioStream.destroy();
++                _wsConnect.on('error', () => { });
 +                _wsConnect.terminate();
 +                reject(error);
 +            };
@@ -119,6 +132,7 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
 +                    return;
 +                settled = true;
 +                cleanup();
++                _wsConnect.on('error', () => { });
 +                _wsConnect.close();
 +                try {
 +                    if (this.saveSubtitles) {
@@ -130,20 +144,26 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
 +                    reject(error);
 +                }
 +            };
-+            const onAbort = () => fail(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
++            const onAbort = () => fail(lifecycleSignal.reason ?? new DOMException('Aborted', 'AbortError'));
 +            const onSocketError = (error) => fail(error);
-+            const onSocketClose = () => fail(new Error('Edge TTS websocket closed before synthesis completed'));
++            const onSocketClose = () => {
++                if (!turnEnded) {
++                    fail(new Error('Edge TTS websocket closed before synthesis completed'));
++                }
++            };
 +            const onStreamError = (error) => fail(error);
-+            const timeout = setTimeout(() => fail(new Error('Timed out')), this.timeout);
 +            const onMessage = (data, isBinary) => {
 +                if (settled)
 +                    return;
                  if (isBinary) {
                      let separator = 'Path:audio\r\n';
                      let index = data.indexOf(separator) + separator.length;
-@@ -108,14 +178,7 @@ class EdgeTTS {
+@@ -107,15 +193,10 @@ class EdgeTTS {
+                 else {
                      let message = data.toString();
                      if (message.includes('Path:turn.end')) {
++                        turnEnded = true;
++                        _wsConnect.removeListener('close', onSocketClose);
                          audioStream.end();
 -                        audioStream.on('finish', () => {
 -                            _wsConnect.close();
@@ -157,18 +177,18 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
                      }
                      else if (message.includes('Path:audio.metadata')) {
                          let splitTexts = message.split('\r\n');
-@@ -132,9 +195,19 @@ class EdgeTTS {
+@@ -132,9 +213,19 @@ class EdgeTTS {
                          catch { }
                      }
                  }
 -            });
 +            };
-+            signal?.addEventListener('abort', onAbort, { once: true });
++            lifecycleSignal.addEventListener('abort', onAbort, { once: true });
 +            _wsConnect.on('message', onMessage);
 +            _wsConnect.once('error', onSocketError);
 +            _wsConnect.once('close', onSocketClose);
 +            audioStream.once('error', onStreamError);
-+            if (signal?.aborted) {
++            if (lifecycleSignal.aborted) {
 +                onAbort();
 +                return;
 +            }
@@ -179,14 +199,21 @@ index fc6c84090696e013411686f4ef1d394248f9be97..d7d499203dcacf1a6c590447ebebf979
        ` + `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${this.lang}">
          <voice name="${this.voice}">
            <prosody rate="${this.rate}" pitch="${this.pitch}" volume="${this.volume}">
-@@ -142,6 +215,10 @@ class EdgeTTS {
+@@ -142,7 +233,16 @@ class EdgeTTS {
            </prosody>
          </voice>
        </speak>`);
+-        });
 +            }
 +            catch (error) {
 +                fail(error);
 +            }
-         });
++            });
++        }
++        finally {
++            clearTimeout(lifecycleTimeout);
++            signal?.removeEventListener('abort', onCallerAbort);
++        }
      }
  }
+ exports.EdgeTTS = EdgeTTS;

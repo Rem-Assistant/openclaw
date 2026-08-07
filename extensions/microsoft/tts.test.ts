@@ -248,6 +248,17 @@ describe("patched node-edge-tts cancellation", () => {
     }
   });
 
+  it("aborts a real connecting websocket without an unhandled error", async () => {
+    const provider = new EdgeTTS({ timeout: 10000 });
+    const controller = new AbortController();
+
+    const pending = provider._connectWebSocket(controller.signal);
+    controller.abort(new Error("connection cancelled"));
+
+    await expect(pending).rejects.toThrow("connection cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
   it("terminates the websocket and rejects promptly when aborted", async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), "edge-provider-test-"));
     const socket = new FakeEdgeSocket();
@@ -279,5 +290,34 @@ describe("patched node-edge-tts cancellation", () => {
     );
     expect(socket.terminate).toHaveBeenCalledOnce();
     expect(socket.listenerCount("message")).toBe(0);
+  });
+
+  it("applies the synthesis timeout while the websocket is still connecting", async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "edge-provider-test-"));
+    const provider = new EdgeTTS({ timeout: 5 });
+    provider._connectWebSocket = async (signal?: AbortSignal) =>
+      await new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+
+    await expect(provider.ttsPromise("Hello", path.join(tempDir, "voice.mp3"))).rejects.toThrow(
+      "Timed out",
+    );
+  });
+
+  it("finishes the file after turn.end even when the remote socket closes first", async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "edge-provider-test-"));
+    const socket = new FakeEdgeSocket();
+    const provider = new EdgeTTS({ timeout: 10000 });
+    provider._connectWebSocket = async () => socket as never;
+
+    const pending = provider.ttsPromise("Hello", path.join(tempDir, "voice.mp3"));
+    await vi.waitFor(() => expect(socket.sentMessages).toHaveLength(1));
+    socket.emit("message", Buffer.from("Path:turn.end"), false);
+    socket.emit("close");
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(socket.terminate).not.toHaveBeenCalled();
+    expect(socket.close).toHaveBeenCalledOnce();
   });
 });
