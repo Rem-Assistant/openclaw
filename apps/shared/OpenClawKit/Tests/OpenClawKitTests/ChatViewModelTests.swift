@@ -92,6 +92,8 @@ private func makeViewModel(
     modelResponses: [[OpenClawChatModelChoice]] = [],
     resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
+    sendMessageHook: (@Sendable (String, String) async throws -> OpenClawChatSendResponse)? = nil,
+    abortRunHook: (@Sendable (String, String) async throws -> Void)? = nil,
     setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
     setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil,
     initialThinkingLevel: String? = nil,
@@ -107,6 +109,8 @@ private func makeViewModel(
         modelResponses: modelResponses,
         resetSessionHook: resetSessionHook,
         compactSessionHook: compactSessionHook,
+        sendMessageHook: sendMessageHook,
+        abortRunHook: abortRunHook,
         setSessionModelHook: setSessionModelHook,
         setSessionThinkingHook: setSessionThinkingHook)
     let vm = await MainActor.run {
@@ -157,6 +161,7 @@ private func sendMessageAndEmitFinal(
                 state: "final",
                 message: nil,
                 errorMessage: nil)))
+    try await waitUntil("send RPC completes") { await MainActor.run { !vm.isSending } }
     return runId
 }
 
@@ -283,6 +288,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let modelResponses: [[OpenClawChatModelChoice]]
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
+    private let sendMessageHook: (@Sendable (String, String) async throws -> OpenClawChatSendResponse)?
+    private let abortRunHook: (@Sendable (String, String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
     private let setSessionThinkingHook: (@Sendable (String) async throws -> Void)?
 
@@ -298,6 +305,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         modelResponses: [[OpenClawChatModelChoice]] = [],
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
+        sendMessageHook: (@Sendable (String, String) async throws -> OpenClawChatSendResponse)? = nil,
+        abortRunHook: (@Sendable (String, String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
         setSessionThinkingHook: (@Sendable (String) async throws -> Void)? = nil)
     {
@@ -309,6 +318,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.modelResponses = modelResponses
         self.resetSessionHook = resetSessionHook
         self.compactSessionHook = compactSessionHook
+        self.sendMessageHook = sendMessageHook
+        self.abortRunHook = abortRunHook
         self.setSessionModelHook = setSessionModelHook
         self.setSessionThinkingHook = setSessionThinkingHook
         var cont: AsyncStream<OpenClawChatTransportEvent>.Continuation!
@@ -343,7 +354,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     }
 
     func sendMessage(
-        sessionKey _: String,
+        sessionKey: String,
         message _: String,
         thinking: String,
         idempotencyKey: String,
@@ -351,11 +362,15 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     {
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
+        if let sendMessageHook = self.sendMessageHook {
+            return try await sendMessageHook(sessionKey, idempotencyKey)
+        }
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
     }
 
-    func abortRun(sessionKey _: String, runId: String) async throws {
+    func abortRun(sessionKey: String, runId: String) async throws {
         await self.state.abortedRunIdsAppend(runId)
+        try await self.abortRunHook?(sessionKey, runId)
     }
 
     func listSessions(limit _: Int?) async throws -> OpenClawChatSessionsListResponse {
@@ -515,6 +530,25 @@ extension TestChatTransportState {
         })
     }
 
+    @Test func explicitRefreshReloadsWarmSessionHistory() async throws {
+        let first = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "first", timestamp: 1)])
+        let refreshed = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "refreshed", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(historyResponses: [first, refreshed])
+        try await loadAndWaitBootstrap(vm: vm)
+        try await waitUntil("initial history loads") {
+            await MainActor.run { vm.messages.first?.content.first?.text == "first" }
+        }
+
+        await MainActor.run { vm.refresh() }
+        try await waitUntil("explicit refresh applies new history") {
+            await MainActor.run { vm.messages.first?.content.first?.text == "refreshed" }
+        }
+
+        #expect(await transport.historyCallCount() == 2)
+    }
+
     @Test func sessionSwitchClearsPriorPixelsBeforeAsyncHistoryStarts() async throws {
         let history = historyPayload(
             messages: [chatTextMessage(role: "assistant", text: "prior chat", timestamp: 1)])
@@ -556,6 +590,140 @@ extension TestChatTransportState {
         try await waitUntil("transport receives captured draft") {
             await transport.lastSentRunId() != nil
         }
+    }
+
+    @Test func slashCommandClearsAttachmentsInTheCallingActorTurn() async throws {
+        let (_, vm) = await makeViewModel(historyResponses: [historyPayload(), historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        let immediateState = await MainActor.run { () -> (String, Int) in
+            vm.input = "/new"
+            vm.attachments = [
+                OpenClawPendingAttachment(
+                    url: nil,
+                    data: Data("draft".utf8),
+                    fileName: "draft.txt",
+                    mimeType: "text/plain",
+                    preview: nil),
+            ]
+            vm.send()
+            return (vm.input, vm.attachments.count)
+        }
+
+        #expect(immediateState.0.isEmpty)
+        #expect(immediateState.1 == 0)
+    }
+
+    @Test func oldSendCompletionCannotMutateNewSessionSendState() async throws {
+        let oldSendGate = AsyncGate()
+        let sentSessions = StringRecorder()
+        let (transport, vm) = await makeViewModel(
+            sessionKey: "chat-a",
+            historyResponses: [
+                historyPayload(sessionKey: "chat-a"),
+                historyPayload(sessionKey: "chat-b"),
+            ],
+            sendMessageHook: { sessionKey, runID in
+                await sentSessions.append(sessionKey)
+                if sessionKey == "chat-a" {
+                    await oldSendGate.wait()
+                    return OpenClawChatSendResponse(runId: "server-run-a", status: "ok")
+                }
+                return OpenClawChatSendResponse(runId: runID, status: "ok")
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "from A")
+        try await waitUntil("A send reaches transport") {
+            await sentSessions.snapshot() == ["chat-a"]
+        }
+
+        await MainActor.run { vm.switchSession(to: "chat-b") }
+        try await waitUntil("B session bootstrap finishes") {
+            await MainActor.run { vm.sessionKey == "chat-b" && vm.healthOK && !vm.isLoading }
+        }
+        #expect(await MainActor.run { !vm.isSending && vm.pendingRunCount == 0 })
+
+        await sendUserMessage(vm, text: "from B")
+        try await waitUntil("B send completes") {
+            let sessions = await sentSessions.snapshot()
+            let isSending = await MainActor.run { vm.isSending }
+            return sessions == ["chat-a", "chat-b"] && !isSending
+        }
+        #expect(await MainActor.run { vm.pendingRunCount == 1 })
+
+        await oldSendGate.open()
+        try await waitUntil("A send ViewModel task completes") {
+            await MainActor.run { vm.inFlightSendOperationCount == 0 }
+        }
+
+        #expect(await MainActor.run {
+            vm.sessionKey == "chat-b" &&
+                !vm.isSending &&
+                vm.errorText == nil &&
+                vm.pendingRunCount == 1
+        })
+        #expect(await transport.historyCallCount() == 2)
+    }
+
+    @Test func oldAbortCannotTargetOrClearNewSessionAbort() async throws {
+        let oldAbortGate = AsyncGate()
+        let newAbortGate = AsyncGate()
+        let abortSessions = StringRecorder()
+        let (_, vm) = await makeViewModel(
+            sessionKey: "chat-a",
+            historyResponses: [
+                historyPayload(sessionKey: "chat-a"),
+                historyPayload(sessionKey: "chat-b"),
+            ],
+            abortRunHook: { sessionKey, runID in
+                await abortSessions.append("\(sessionKey):\(runID)")
+                if sessionKey == "chat-a" {
+                    await oldAbortGate.wait()
+                } else if sessionKey == "chat-b" {
+                    await newAbortGate.wait()
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await sendUserMessage(vm, text: "from A")
+        try await waitUntil("A run becomes pending") {
+            await MainActor.run { vm.pendingRunCount == 1 && !vm.isSending }
+        }
+        await MainActor.run { vm.abort() }
+        try await waitUntil("A abort reaches transport") {
+            await abortSessions.snapshot().count == 1
+        }
+
+        await MainActor.run { vm.switchSession(to: "chat-b") }
+        try await waitUntil("B session bootstrap finishes") {
+            await MainActor.run { vm.sessionKey == "chat-b" && vm.healthOK && !vm.isLoading }
+        }
+        await sendUserMessage(vm, text: "from B")
+        try await waitUntil("B run becomes pending") {
+            await MainActor.run { vm.pendingRunCount == 1 && !vm.isSending }
+        }
+        await MainActor.run { vm.abort() }
+        try await waitUntil("B abort reaches transport") {
+            await abortSessions.snapshot().count == 2
+        }
+
+        let targets = await abortSessions.snapshot()
+        #expect(targets[0].hasPrefix("chat-a:"))
+        #expect(targets[1].hasPrefix("chat-b:"))
+        #expect(await MainActor.run { vm.isAborting && vm.inFlightAbortOperationCount == 2 })
+
+        await oldAbortGate.open()
+        try await waitUntil("A abort ViewModel task completes while B stays active") {
+            await MainActor.run { vm.inFlightAbortOperationCount == 1 }
+        }
+        #expect(await MainActor.run { vm.sessionKey == "chat-b" && vm.isAborting })
+
+        await newAbortGate.open()
+        try await waitUntil("B abort ViewModel task completes") {
+            await MainActor.run { vm.inFlightAbortOperationCount == 0 }
+        }
+        #expect(await MainActor.run { !vm.isAborting })
     }
 
     @Test func staleActiveSessionCompletionRetriesAndReassertsLatestKey() async throws {

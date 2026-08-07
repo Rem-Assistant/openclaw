@@ -50,6 +50,8 @@ public final class OpenClawChatViewModel {
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
     private var loadedSessionGeneration: UInt64?
+    internal private(set) var inFlightSendOperationCount = 0
+    internal private(set) var inFlightAbortOperationCount = 0
     private var confirmedActiveSessionKey: String?
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
@@ -139,11 +141,13 @@ public final class OpenClawChatViewModel {
 
         if Self.resetTriggers.contains(trimmed.lowercased()) {
             self.input = ""
+            self.attachments = []
             Task { await self.performReset() }
             return
         }
         if Self.compactTriggers.contains(trimmed.lowercased()) {
             self.input = ""
+            self.attachments = []
             Task { await self.performCompact() }
             return
         }
@@ -162,6 +166,7 @@ public final class OpenClawChatViewModel {
         }
         let draft = PendingSend(
             sessionKey: self.sessionKey,
+            sessionGeneration: self.sessionGeneration,
             runID: UUID().uuidString,
             messageText: messageText,
             thinkingLevel: self.thinkingLevel,
@@ -175,6 +180,7 @@ public final class OpenClawChatViewModel {
         self.isSending = true
         self.errorText = nil
         self.beginOptimisticSend(draft)
+        self.inFlightSendOperationCount += 1
         Task { await self.performSend(draft) }
     }
 
@@ -201,6 +207,10 @@ public final class OpenClawChatViewModel {
         self.attachments = []
         self.streamingAssistantText = nil
         self.pendingToolCallsById = [:]
+        self.clearPendingRuns(reason: nil)
+        self.isSending = false
+        self.isAborting = false
+        self.errorText = nil
         self.sessionId = nil
         self.confirmedActiveSessionKey = nil
         self.modelSelectionID = Self.defaultModelSelectionID
@@ -315,6 +325,7 @@ public final class OpenClawChatViewModel {
 
     private struct PendingSend {
         var sessionKey: String
+        var sessionGeneration: UInt64
         var runID: String
         var messageText: String
         var thinkingLevel: String
@@ -698,6 +709,7 @@ public final class OpenClawChatViewModel {
     }
 
     private func performSend(_ draft: PendingSend) async {
+        defer { self.inFlightSendOperationCount -= 1 }
         do {
             await self.waitForPendingModelPatches(in: draft.sessionKey)
             let response = try await self.transport.sendMessage(
@@ -706,30 +718,41 @@ public final class OpenClawChatViewModel {
                 thinking: draft.thinkingLevel,
                 idempotencyKey: draft.runID,
                 attachments: draft.attachments)
+            guard draft.sessionGeneration == self.sessionGeneration else { return }
             if response.runId != draft.runID {
                 self.clearPendingRun(draft.runID)
                 self.pendingRuns.insert(response.runId)
                 self.armPendingRunTimeout(runId: response.runId)
             }
         } catch {
+            guard draft.sessionGeneration == self.sessionGeneration else { return }
             self.clearPendingRun(draft.runID)
             self.errorText = error.localizedDescription
             chatUILogger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
         }
 
+        guard draft.sessionGeneration == self.sessionGeneration else { return }
         self.isSending = false
     }
 
     private func performAbort() async {
         guard !self.pendingRuns.isEmpty else { return }
         guard !self.isAborting else { return }
+        let sessionKey = self.sessionKey
+        let generation = self.sessionGeneration
         self.isAborting = true
-        defer { self.isAborting = false }
+        self.inFlightAbortOperationCount += 1
+        defer {
+            self.inFlightAbortOperationCount -= 1
+            if generation == self.sessionGeneration {
+                self.isAborting = false
+            }
+        }
 
         let runIds = Array(self.pendingRuns)
         for runId in runIds {
             do {
-                try await self.transport.abortRun(sessionKey: self.sessionKey, runId: runId)
+                try await self.transport.abortRun(sessionKey: sessionKey, runId: runId)
             } catch {
                 // Best-effort.
             }
