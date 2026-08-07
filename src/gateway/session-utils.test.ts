@@ -1344,7 +1344,7 @@ describe("listSessionsFromStore selected model display", () => {
     }
   });
 
-  test("hydrates every explicitly requested transcript row", async () => {
+  test("hydrates every explicitly requested transcript row with bounded workers", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-cap-"));
     try {
       const storePath = path.join(tmpDir, "sessions.json");
@@ -1381,6 +1381,10 @@ describe("listSessionsFromStore selected model display", () => {
       expect(result.sessions).toHaveLength(101);
       expect(result.sessions[0]?.derivedTitle).toBe("title 0");
       expect(result.sessions[0]?.lastMessagePreview).toBe("last 0");
+      // A materialized entry with no transcript content must not expose the
+      // technical session-id/date fallback as a conversation title.
+      expect(result.sessions[50]?.derivedTitle).toBeUndefined();
+      expect(result.sessions[50]?.lastMessagePreview).toBeUndefined();
       expect(result.sessions[99]?.derivedTitle).toBe("title 99");
       expect(result.sessions[99]?.lastMessagePreview).toBe("last 99");
       expect(result.sessions[100]?.derivedTitle).toBe("title 100");
