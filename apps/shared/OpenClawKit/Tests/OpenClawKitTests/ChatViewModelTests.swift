@@ -635,6 +635,140 @@ extension TestChatTransportState {
         #expect(await historyRequests.current() == 2)
     }
 
+    @Test func failedActivationDoesNotMarkSessionWarmAndNextAppearanceRecovers() async throws {
+        let activationAttempts = AsyncCounter()
+        let initial = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "history without activation", timestamp: 1)])
+        let recovered = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "activation recovered", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [initial, recovered],
+            setActiveSessionHook: { _ in
+                if await activationAttempts.increment() == 1 {
+                    throw URLError(.cannotConnectToHost)
+                }
+            })
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("first bootstrap finishes without activation") {
+            await MainActor.run { !vm.isLoading && !vm.healthOK }
+        }
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("appearance retries activation and history") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "activation recovered" &&
+                    vm.healthOK && !vm.isLoading
+            }
+        }
+
+        #expect(await activationAttempts.current() == 2)
+        #expect(await transport.historyCallCount() == 2)
+    }
+
+    @Test func failedPostRunHistoryRefreshMakesReentryHealFromGateway() async throws {
+        let historyAttempts = AsyncCounter()
+        let initial = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "before run", timestamp: 1)])
+        let recovered = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "durable final", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [],
+            historyRequestHook: { _ in
+                switch await historyAttempts.increment() {
+                case 1: return initial
+                case 2: throw URLError(.networkConnectionLost)
+                default: return recovered
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+        _ = try await sendMessageAndEmitFinal(transport: transport, vm: vm, text: "run")
+        try await waitUntil("post-run refresh fails") { await historyAttempts.current() == 2 }
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("re-entry heals failed run refresh") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "durable final" && !vm.isLoading
+            }
+        }
+
+        #expect(await historyAttempts.current() == 3)
+    }
+
+    @Test func failedPostResetBootstrapRemainsRetryableOnReentry() async throws {
+        let historyAttempts = AsyncCounter()
+        let initial = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "before reset", timestamp: 1)])
+        let recovered = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "after reset", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [],
+            historyRequestHook: { _ in
+                switch await historyAttempts.increment() {
+                case 1: return initial
+                case 2: throw URLError(.networkConnectionLost)
+                default: return recovered
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "/new"
+            vm.send()
+        }
+        try await waitUntil("post-reset bootstrap fails") {
+            guard await historyAttempts.current() == 2 else { return false }
+            return await MainActor.run { vm.errorText != nil && !vm.isLoading }
+        }
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("re-entry heals reset bootstrap") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "after reset" && !vm.isLoading
+            }
+        }
+
+        #expect(await transport.resetSessionKeys() == ["main"])
+        #expect(await historyAttempts.current() == 3)
+    }
+
+    @Test func failedPostCompactBootstrapRemainsRetryableOnReentry() async throws {
+        let historyAttempts = AsyncCounter()
+        let initial = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "before compact", timestamp: 1)])
+        let recovered = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "after compact", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [],
+            historyRequestHook: { _ in
+                switch await historyAttempts.increment() {
+                case 1: return initial
+                case 2: throw URLError(.networkConnectionLost)
+                default: return recovered
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "/compact"
+            vm.send()
+        }
+        try await waitUntil("post-compact bootstrap fails") {
+            guard await historyAttempts.current() == 2 else { return false }
+            return await MainActor.run { vm.errorText != nil && !vm.isLoading }
+        }
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("re-entry heals compact bootstrap") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "after compact" && !vm.isLoading
+            }
+        }
+
+        #expect(await transport.compactSessionKeys() == ["main"])
+        #expect(await historyAttempts.current() == 3)
+    }
+
     @Test func sessionSwitchClearsConversationScopedComposerState() async {
         let transport = TestChatTransport(historyResponses: [historyPayload(sessionKey: "other")])
         let vm = await MainActor.run {

@@ -353,6 +353,17 @@ public final class OpenClawChatViewModel {
         request.sessionKey == self.sessionKey && request.generation == self.sessionGeneration
     }
 
+    private func markCurrentSessionWarmIfUsable(generation: UInt64) {
+        guard generation == self.sessionGeneration,
+              self.confirmedActiveSessionKey == self.sessionKey,
+              self.healthOK
+        else {
+            self.loadedSessionGeneration = nil
+            return
+        }
+        self.loadedSessionGeneration = generation
+    }
+
     private func setTransportActiveSession(for request: BootstrapRequest) async {
         var activated = false
         do {
@@ -438,7 +449,10 @@ public final class OpenClawChatViewModel {
             guard self.isCurrentBootstrap(request) else { return }
             await self.fetchModels(bootstrapRequest: request)
             guard self.isCurrentBootstrap(request) else { return }
-            self.loadedSessionGeneration = request.sessionGeneration
+            // A painted transcript alone is not a usable warm chat. If activation or health failed,
+            // a later appearance must retry the full bootstrap instead of getting stuck behind the
+            // warm-session fast path.
+            self.markCurrentSessionWarmIfUsable(generation: request.sessionGeneration)
             self.errorText = nil
         } catch {
             guard self.isCurrentBootstrap(request) else { return }
@@ -947,6 +961,9 @@ public final class OpenClawChatViewModel {
         }
 
         guard self.isCurrentSessionRequest(request) else { return }
+        // Reset succeeded, so the pre-reset transcript can no longer be treated as authoritative.
+        // Clear warm state before bootstrapping so a failed reload remains retryable on re-entry.
+        self.loadedSessionGeneration = nil
         self.startBootstrap()
     }
 
@@ -990,6 +1007,9 @@ public final class OpenClawChatViewModel {
         }
         self.lastCompactAt = Date()
         self.isCompacting = false
+        // Compaction succeeded, so a failed bootstrap must not leave the pre-compact transcript
+        // marked warm and suppress the next appearance retry.
+        self.loadedSessionGeneration = nil
         self.startBootstrap()
     }
 
@@ -1569,8 +1589,12 @@ public final class OpenClawChatViewModel {
                 self.thinkingLevel = level
                 self.syncThinkingLevelOptions()
             }
+            self.markCurrentSessionWarmIfUsable(generation: request.generation)
         } catch {
             guard self.isCurrentSessionRequest(request) else { return }
+            // The final event cleared transient run UI, but durable history did not reconcile.
+            // Force the next appearance to heal from the gateway instead of preserving stale pixels.
+            self.loadedSessionGeneration = nil
             chatUILogger.error("refresh history failed \(error.localizedDescription, privacy: .public)")
         }
     }
