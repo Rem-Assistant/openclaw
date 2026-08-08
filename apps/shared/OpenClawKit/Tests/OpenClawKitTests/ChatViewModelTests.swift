@@ -543,6 +543,98 @@ extension TestChatTransportState {
 }
 
 @Suite struct ChatViewModelTests {
+    @Test func repeatedViewAppearanceKeepsWarmSessionWithoutReloadingHistory() async throws {
+        let history = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "already warm", timestamp: 1)])
+        let (transport, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.load()
+            vm.load()
+        }
+        try await Task.sleep(for: .milliseconds(25))
+
+        #expect(await transport.historyCallCount() == 1)
+        #expect(await MainActor.run {
+            vm.messages.first?.content.first?.text == "already warm" && !vm.isLoading
+        })
+    }
+
+    @Test func repeatedAppearanceDuringBootstrapCoalescesOntoExistingRequest() async throws {
+        let gate = AsyncGate()
+        let historyRequests = AsyncCounter()
+        let history = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "loaded once", timestamp: 1)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [],
+            historyRequestHook: { _ in
+                _ = await historyRequests.increment()
+                await gate.wait()
+                return history
+            })
+
+        await MainActor.run {
+            vm.load()
+            vm.load()
+        }
+        try await waitUntil("history request starts") {
+            await historyRequests.current() == 1
+        }
+        await gate.open()
+        try await waitUntil("coalesced bootstrap") {
+            await MainActor.run { vm.healthOK && !vm.isLoading }
+        }
+
+        #expect(await historyRequests.current() == 1)
+        #expect(await transport.historyCallCount() == 0)
+    }
+
+    @Test func explicitRefreshReloadsWarmSessionHistory() async throws {
+        let first = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "first", timestamp: 1)])
+        let refreshed = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "refreshed", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(historyResponses: [first, refreshed])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run { vm.refresh() }
+        try await waitUntil("explicit refresh") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "refreshed" && !vm.isLoading
+            }
+        }
+
+        #expect(await transport.historyCallCount() == 2)
+    }
+
+    @Test func failedAppearanceLoadRemainsRetryable() async throws {
+        let historyRequests = AsyncCounter()
+        let recovered = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "recovered", timestamp: 1)])
+        let (_, vm) = await makeViewModel(
+            historyResponses: [],
+            historyRequestHook: { _ in
+                let attempt = await historyRequests.increment()
+                if attempt == 1 { throw URLError(.cannotConnectToHost) }
+                return recovered
+            })
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("first bootstrap fails") {
+            await MainActor.run { vm.errorText != nil && !vm.isLoading }
+        }
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("appearance retry succeeds") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "recovered" && !vm.isLoading
+            }
+        }
+
+        #expect(await historyRequests.current() == 2)
+    }
+
     @Test func sessionSwitchClearsConversationScopedComposerState() async {
         let transport = TestChatTransport(historyResponses: [historyPayload(sessionKey: "other")])
         let vm = await MainActor.run {

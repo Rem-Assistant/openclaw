@@ -58,6 +58,10 @@ public final class OpenClawChatViewModel {
     private var nextBootstrapGeneration: UInt64 = 0
     private var activeBootstrapGeneration: UInt64 = 0
     private var sessionGeneration: UInt64 = 0
+    /// Generation whose complete bootstrap is already painted. View appearance is not a refresh
+    /// command: the same long-lived model can reappear after Sessions without invalidating its
+    /// transcript. `refresh()` remains the explicit network-reload path.
+    private var loadedSessionGeneration: UInt64?
     private var queuedSessionKeyAfterSend: String?
     private struct ComposerDraft {
         var input: String
@@ -144,10 +148,13 @@ public final class OpenClawChatViewModel {
     }
 
     public func load() {
+        guard self.loadedSessionGeneration != self.sessionGeneration else { return }
+        guard self.bootstrapTask == nil else { return }
         self.startBootstrap()
     }
 
     public func refresh() {
+        self.loadedSessionGeneration = nil
         self.startBootstrap()
     }
 
@@ -431,6 +438,7 @@ public final class OpenClawChatViewModel {
             guard self.isCurrentBootstrap(request) else { return }
             await self.fetchModels(bootstrapRequest: request)
             guard self.isCurrentBootstrap(request) else { return }
+            self.loadedSessionGeneration = request.sessionGeneration
             self.errorText = nil
         } catch {
             guard self.isCurrentBootstrap(request) else { return }
