@@ -167,6 +167,23 @@ public final class OpenClawChatViewModel {
         }
     }
 
+    /// Reconciles a caller-authorized model selection before sending. If the session retained an
+    /// explicit override that the caller can no longer offer, the reset-to-default patch must
+    /// succeed before any message is dispatched; a failed patch therefore fails closed.
+    public func send(modelSelectionID selectionID: String) {
+        guard self.activeSendTask == nil else { return }
+        self.activeSendTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.activeSendTask = nil }
+            let effectiveSelectionID = self.normalizedSelectionID(selectionID)
+            if effectiveSelectionID != self.modelSelectionID {
+                await self.performSelectModel(effectiveSelectionID)
+                guard self.modelSelectionID == effectiveSelectionID else { return }
+            }
+            await self.performSend()
+        }
+    }
+
     public func abort() {
         Task { await self.performAbort() }
     }

@@ -1,4 +1,8 @@
-import { resolveDefaultAgentDir } from "../../agents/agent-scope.js";
+import {
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentDir,
+  resolveDefaultAgentId,
+} from "../../agents/agent-scope.js";
 import {
   type AuthHealthSummary,
   type AuthProfileHealthStatus,
@@ -11,6 +15,7 @@ import {
   ensureAuthProfileStore,
   externalCliDiscoveryForConfigStatus,
 } from "../../agents/auth-profiles.js";
+import { hasAvailableAuthForProvider } from "../../agents/model-auth.js";
 import { normalizeProviderId } from "../../agents/provider-id.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { isSecretRef } from "../../config/types.secrets.js";
@@ -64,6 +69,30 @@ export type ModelAuthStatusResult = {
   ts: number;
   providers: ModelAuthStatusProvider[];
 };
+
+export type ModelAuthAvailabilityResult = {
+  ts: number;
+  providers: Array<{
+    provider: string;
+    available: boolean;
+  }>;
+};
+
+const MAX_AUTH_AVAILABILITY_PROVIDERS = 128;
+
+function requestedAuthAvailabilityProviders(params: unknown): string[] | null {
+  const raw = (params as { providers?: unknown } | undefined)?.providers;
+  if (!Array.isArray(raw) || raw.length > MAX_AUTH_AVAILABILITY_PROVIDERS) {
+    return null;
+  }
+  const normalized = raw.map((provider) =>
+    typeof provider === "string" ? normalizeProviderId(provider) : "",
+  );
+  if (normalized.some((provider) => !provider)) {
+    return null;
+  }
+  return [...new Set(normalized)].toSorted();
+}
 
 const CACHE_TTL_MS = 60_000;
 let cached: { ts: number; result: ModelAuthStatusResult } | null = null;
@@ -285,6 +314,44 @@ function resolveConfiguredProviders(cfg: OpenClawConfig): {
 }
 
 export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
+  "models.authAvailability": async ({ params, respond, context }) => {
+    const providers = requestedAuthAvailabilityProviders(params);
+    if (!providers) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `models.authAvailability requires up to ${MAX_AUTH_AVAILABILITY_PROVIDERS} provider ids`,
+        ),
+      );
+      return;
+    }
+    try {
+      const cfg = context.getRuntimeConfig();
+      const agentDir = resolveDefaultAgentDir(cfg);
+      const workspaceDir = resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg));
+      const store = ensureAuthProfileStore(agentDir, {
+        externalCli: externalCliDiscoveryForConfigStatus({ cfg }),
+      });
+      const availability = await Promise.all(
+        providers.map(async (provider) => ({
+          provider,
+          available: await hasAvailableAuthForProvider({
+            provider,
+            cfg,
+            agentDir,
+            workspaceDir,
+            store,
+          }),
+        })),
+      );
+      const result: ModelAuthAvailabilityResult = { ts: Date.now(), providers: availability };
+      respond(true, result, undefined);
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
+    }
+  },
   "models.authStatus": async ({ params, respond, context }) => {
     const now = Date.now();
     const bypassCache = Boolean((params as { refresh?: boolean } | undefined)?.refresh);

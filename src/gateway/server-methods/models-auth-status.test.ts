@@ -5,6 +5,8 @@ import type { GatewayRequestHandlerOptions } from "./types.js";
 const mocks = vi.hoisted(() => ({
   getRuntimeConfig: vi.fn(() => ({})),
   resolveDefaultAgentDir: vi.fn(() => "/tmp/agent"),
+  resolveDefaultAgentId: vi.fn(() => "main"),
+  resolveAgentWorkspaceDir: vi.fn(() => "/tmp/workspace"),
   ensureAuthProfileStore: vi.fn((agentDir?: string, options?: unknown) => {
     void agentDir;
     void options;
@@ -14,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     (): AuthHealthSummary => ({ now: 0, warnAfterMs: 0, profiles: [], providers: [] }),
   ),
   loadProviderUsageSummary: vi.fn(async () => ({ updatedAt: 0, providers: [] })),
+  hasAvailableAuthForProvider: vi.fn(async (_params: { provider: string }) => false),
 }));
 
 vi.mock("../../config/config.js", () => ({
@@ -22,6 +25,8 @@ vi.mock("../../config/config.js", () => ({
 
 vi.mock("../../agents/agent-scope.js", () => ({
   resolveDefaultAgentDir: mocks.resolveDefaultAgentDir,
+  resolveDefaultAgentId: mocks.resolveDefaultAgentId,
+  resolveAgentWorkspaceDir: mocks.resolveAgentWorkspaceDir,
 }));
 
 vi.mock("../../agents/auth-profiles.js", async () => {
@@ -48,10 +53,15 @@ vi.mock("../../infra/provider-usage.load.js", () => ({
   loadProviderUsageSummary: mocks.loadProviderUsageSummary,
 }));
 
+vi.mock("../../agents/model-auth.js", () => ({
+  hasAvailableAuthForProvider: mocks.hasAvailableAuthForProvider,
+}));
+
 import {
   aggregateOAuthStatus,
   invalidateModelAuthStatusCache,
   modelsAuthStatusHandlers,
+  type ModelAuthAvailabilityResult,
   type ModelAuthStatusResult,
 } from "./models-auth-status.js";
 
@@ -70,6 +80,7 @@ function createOptions(
 }
 
 const handler = modelsAuthStatusHandlers["models.authStatus"];
+const availabilityHandler = modelsAuthStatusHandlers["models.authAvailability"];
 
 function requireRecord(value: unknown): Record<string, unknown> {
   expect(value).toBeTruthy();
@@ -118,6 +129,7 @@ describe("models.authStatus", () => {
       providers: [],
     });
     mocks.loadProviderUsageSummary.mockResolvedValue({ updatedAt: 0, providers: [] });
+    mocks.hasAvailableAuthForProvider.mockResolvedValue(false);
   });
 
   it("returns a serialisable snapshot on first call", async () => {
@@ -498,6 +510,41 @@ describe("models.authStatus", () => {
     expect(ok).toBe(false);
     expect(payload).toBeUndefined();
     expect(String(requireRecord(error).code)).toMatch(/unavailable/i);
+  });
+});
+
+describe("models.authAvailability", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getRuntimeConfig.mockReturnValue({});
+    mocks.hasAvailableAuthForProvider.mockImplementation(
+      async ({ provider }) => provider === "anthropic",
+    );
+  });
+
+  it("reports runtime auth availability instead of catalog/config membership", async () => {
+    const opts = createOptions({ providers: [" OpenAI ", "anthropic", "openai"] });
+    await availabilityHandler(opts);
+
+    const [ok, payload, error] = opts.respond.mock.calls[0] ?? [];
+    expect(ok).toBe(true);
+    expect(error).toBeUndefined();
+    expect((payload as ModelAuthAvailabilityResult).providers).toEqual([
+      { provider: "anthropic", available: true },
+      { provider: "openai", available: false },
+    ]);
+    expect(mocks.hasAvailableAuthForProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects malformed provider requests without probing auth", async () => {
+    const opts = createOptions({ providers: ["anthropic", 42] });
+    await availabilityHandler(opts);
+
+    const [ok, payload, error] = opts.respond.mock.calls[0] ?? [];
+    expect(ok).toBe(false);
+    expect(payload).toBeUndefined();
+    expect(requireRecord(error).code).toBe("INVALID_REQUEST");
+    expect(mocks.hasAvailableAuthForProvider).not.toHaveBeenCalled();
   });
 });
 

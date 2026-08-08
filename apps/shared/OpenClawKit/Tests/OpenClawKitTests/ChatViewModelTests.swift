@@ -1675,6 +1675,70 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.modelSelectionID } == OpenClawChatViewModel.defaultModelSelectionID)
     }
 
+    @Test func authorizedSendResetsUnavailableSessionOverrideBeforeDispatch() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [
+                        sessionEntry(key: "main", updatedAt: now, model: "claude-opus-4-6", modelProvider: "anthropic"),
+                    ])
+            ],
+            modelResponses: [[modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6")]])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "Use an available model"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID)
+        }
+
+        try await waitUntil("default patch and send complete") {
+            let patchedModels = await transport.patchedModels()
+            let sentRunID = await transport.lastSentRunId()
+            return patchedModels == [nil] && sentRunID != nil
+        }
+        #expect(await MainActor.run { vm.modelSelectionID } == OpenClawChatViewModel.defaultModelSelectionID)
+    }
+
+    @Test func authorizedSendFailsClosedWhenDefaultResetFails() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [
+                        sessionEntry(key: "main", updatedAt: now, model: "claude-opus-4-6", modelProvider: "anthropic"),
+                    ])
+            ],
+            modelResponses: [[modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6")]],
+            setSessionModelHook: { _ in
+                throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "patch failed"])
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "Do not send with stale override"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID)
+        }
+
+        try await waitUntil("default patch fails") {
+            await transport.patchedModels() == [nil]
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.input } == "Do not send with stale override")
+        #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
+    }
+
     @Test func selectingProviderQualifiedModelDisambiguatesDuplicateModelIDs() async throws {
         let now = Date().timeIntervalSince1970 * 1000
         let history = historyPayload()
