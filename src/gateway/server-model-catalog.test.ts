@@ -145,6 +145,48 @@ describe("loadGatewayModelCatalog", () => {
     expect(loadModelCatalog).toHaveBeenCalledTimes(2);
   });
 
+  it("does not cache an incomplete full catalog so the next all-model request retries", async () => {
+    const partialModels = [model("partial")];
+    const completeModels = [model("partial"), model("recovered")];
+    const loadModelCatalogSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce({
+        models: partialModels,
+        complete: false,
+        source: "provider-discovery-partial" as const,
+      })
+      .mockResolvedValueOnce({
+        models: completeModels,
+        complete: true,
+        source: "provider-discovery" as const,
+      });
+
+    await expect(
+      loadGatewayModelCatalogSnapshot({
+        getConfig,
+        loadModelCatalogSnapshot,
+        readOnly: false,
+      }),
+    ).resolves.toEqual({
+      models: partialModels,
+      complete: false,
+      source: "provider-discovery-partial",
+    });
+    await expect(
+      loadGatewayModelCatalogSnapshot({
+        getConfig,
+        loadModelCatalogSnapshot,
+        readOnly: false,
+      }),
+    ).resolves.toEqual({
+      models: completeModels,
+      complete: true,
+      source: "provider-discovery",
+    });
+
+    expect(loadModelCatalogSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it("returns the last catalog while a stale reload refresh is still pending", async () => {
     const staleCatalog = [model("gpt-5.4")];
     const freshCatalog = [model("gpt-5.5")];

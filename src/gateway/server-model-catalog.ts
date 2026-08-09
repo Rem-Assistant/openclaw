@@ -87,7 +87,7 @@ function startGatewayModelCatalogRefresh(
     .then((loadModelCatalog) => loadModelCatalog({ config, readOnly }))
     .then((snapshot) => {
       if (
-        (readOnly || snapshot.models.length > 0) &&
+        (readOnly || (snapshot.complete && snapshot.models.length > 0)) &&
         refreshGeneration === cache.staleGeneration
       ) {
         cache.lastSuccessfulCatalog = snapshot;
