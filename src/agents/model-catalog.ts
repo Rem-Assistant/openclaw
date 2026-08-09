@@ -357,7 +357,7 @@ export async function loadModelCatalogSnapshot(params?: {
     return modelCatalogPromise;
   }
 
-  const loadCatalog = async () => {
+  const loadCatalog = async (): Promise<ModelCatalogSnapshot> => {
     const models: ModelCatalogEntry[] = [];
     const timingEnabled = shouldLogModelCatalogTiming();
     const startMs = timingEnabled ? Date.now() : 0;
