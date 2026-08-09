@@ -1771,6 +1771,88 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
     }
 
+    @Test func authorizedResetCommandRunsBeforeUnavailableModelReconciliation() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let beforeDispatchCount = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(), historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [
+                        sessionEntry(
+                            key: "main",
+                            updatedAt: now,
+                            model: "claude-opus-4-6",
+                            modelProvider: "anthropic"),
+                    ])
+            ],
+            modelResponses: [[modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6")]],
+            setSessionModelHook: { _ in
+                throw NSError(domain: "test", code: 1)
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "/reset"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+        }
+
+        try await waitUntil("authorized reset command runs") {
+            await transport.resetSessionKeys() == ["main"]
+        }
+        #expect(await transport.patchedModels().isEmpty)
+        #expect(await beforeDispatchCount.current() == 0)
+        #expect(await transport.lastSentRunId() == nil)
+    }
+
+    @Test func authorizedCompactCommandRunsBeforeUnavailableModelReconciliation() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let beforeDispatchCount = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(), historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [
+                        sessionEntry(
+                            key: "main",
+                            updatedAt: now,
+                            model: "claude-opus-4-6",
+                            modelProvider: "anthropic"),
+                    ])
+            ],
+            modelResponses: [[modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6")]],
+            setSessionModelHook: { _ in
+                throw NSError(domain: "test", code: 1)
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "/compact"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+        }
+
+        try await waitUntil("authorized compact command runs") {
+            await transport.compactSessionKeys() == ["main"]
+        }
+        #expect(await transport.patchedModels().isEmpty)
+        #expect(await beforeDispatchCount.current() == 0)
+        #expect(await transport.lastSentRunId() == nil)
+    }
+
     @Test func authorizedSendDoesNotChargeWhenAcceptedInFlightModelPatchFails() async throws {
         let modelPatchGate = AsyncGate()
         let modelPatchAttempts = AsyncCounter()

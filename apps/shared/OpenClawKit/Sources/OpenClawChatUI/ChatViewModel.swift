@@ -219,6 +219,13 @@ public final class OpenClawChatViewModel {
                     self.performSessionSwitch(to: queuedSessionKey)
                 }
             }
+            // Session commands do not dispatch a model turn and must remain available even when a
+            // stale/unavailable explicit model cannot be repaired. `performSend` classifies and
+            // executes them before health/quota; bypass model reconciliation here as well.
+            if Self.isSessionCommand(snapshot.message) {
+                await self.performSend(snapshot: snapshot, beforeDispatch: beforeDispatch)
+                return
+            }
             // A picker patch may already be in flight when Send synchronously claims the turn.
             // Wait for its authoritative result before quota. If it failed or resolved to a
             // different model, repair the exact accepted selection and fail closed on failure.
@@ -746,6 +753,11 @@ public final class OpenClawChatViewModel {
 
     private static let resetTriggers: Set<String> = ["/new", "/reset", "/clear"]
     private static let compactTriggers: Set<String> = ["/compact"]
+
+    private static func isSessionCommand(_ message: String) -> Bool {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return resetTriggers.contains(normalized) || compactTriggers.contains(normalized)
+    }
 
     private func performSend(
         snapshot: AuthorizedSendSnapshot? = nil,
