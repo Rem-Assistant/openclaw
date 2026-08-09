@@ -90,6 +90,7 @@ private func makeViewModel(
     requestHealthHook: (@Sendable () async throws -> Bool)? = nil,
     sessionsResponses: [OpenClawChatSessionsListResponse] = [],
     modelResponses: [[OpenClawChatModelChoice]] = [],
+    modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])? = nil,
     resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -105,6 +106,7 @@ private func makeViewModel(
         requestHealthHook: requestHealthHook,
         sessionsResponses: sessionsResponses,
         modelResponses: modelResponses,
+        modelRequestHook: modelRequestHook,
         resetSessionHook: resetSessionHook,
         compactSessionHook: compactSessionHook,
         setSessionModelHook: setSessionModelHook,
@@ -298,6 +300,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let sessionsResponses: [OpenClawChatSessionsListResponse]
     private let sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)?
     private let modelResponses: [[OpenClawChatModelChoice]]
+    private let modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])?
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
@@ -316,6 +319,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         sessionsResponses: [OpenClawChatSessionsListResponse] = [],
         sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)? = nil,
         modelResponses: [[OpenClawChatModelChoice]] = [],
+        modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])? = nil,
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -330,6 +334,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.sessionsResponses = sessionsResponses
         self.sessionsRequestHook = sessionsRequestHook
         self.modelResponses = modelResponses
+        self.modelRequestHook = modelRequestHook
         self.resetSessionHook = resetSessionHook
         self.compactSessionHook = compactSessionHook
         self.setSessionModelHook = setSessionModelHook
@@ -418,6 +423,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     }
 
     func listModels() async throws -> [OpenClawChatModelChoice] {
+        if let modelRequestHook {
+            return try await modelRequestHook()
+        }
         let idx = await self.state.modelsCallCount
         await self.state.setModelsCallCount(idx + 1)
         if idx < self.modelResponses.count {
@@ -1660,6 +1668,38 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.showsModelPicker })
         #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
         #expect(await MainActor.run { vm.defaultModelLabel } == "Default: openai/gpt-4.1-mini")
+    }
+
+    @Test(arguments: [false, true])
+    func providerQualifiedSessionSelectionSurvivesEmptyOrFailedModelsList(fails: Bool) async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let sessions = OpenClawChatSessionsListResponse(
+            ts: now,
+            path: nil,
+            count: 1,
+            defaults: nil,
+            sessions: [
+                sessionEntry(
+                    key: "main",
+                    updatedAt: now,
+                    model: "claude-opus-4-6",
+                    modelProvider: "anthropic"),
+            ])
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [sessions],
+            modelRequestHook: {
+                if fails { throw NSError(domain: "models.list", code: 1) }
+                return []
+            })
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("bootstrap finishes after models.list") {
+            await MainActor.run { !vm.isLoading && vm.healthOK }
+        }
+
+        #expect(await MainActor.run { vm.modelChoices.isEmpty })
+        #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
     }
 
     @Test func selectingDefaultModelPatchesNilAndUpdatesSelection() async throws {
