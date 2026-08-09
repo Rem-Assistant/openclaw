@@ -9,6 +9,7 @@ let findModelCatalogEntry: typeof import("./model-catalog.js").findModelCatalogE
 let findModelInCatalog: typeof import("./model-catalog.js").findModelInCatalog;
 let loadManifestModelCatalog: typeof import("./model-catalog.js").loadManifestModelCatalog;
 let loadModelCatalog: typeof import("./model-catalog.js").loadModelCatalog;
+let loadModelCatalogSnapshot: typeof import("./model-catalog.js").loadModelCatalogSnapshot;
 let modelSupportsInput: typeof import("./model-catalog.js").modelSupportsInput;
 let resetModelCatalogCacheForTest: typeof import("./model-catalog.js").resetModelCatalogCacheForTest;
 let augmentCatalogMock: ReturnType<typeof vi.fn>;
@@ -176,6 +177,7 @@ describe("loadModelCatalog", () => {
       findModelInCatalog,
       loadManifestModelCatalog,
       loadModelCatalog,
+      loadModelCatalogSnapshot,
       modelSupportsInput,
       resetModelCatalogCacheForTest,
     } = await import("./model-catalog.js"));
@@ -275,8 +277,12 @@ describe("loadModelCatalog", () => {
           }) as unknown as PiSdkModule,
       );
 
-      const result = await loadModelCatalog({ config: {} as OpenClawConfig });
-      expect(result).toEqual([{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }]);
+      const result = await loadModelCatalogSnapshot({ config: {} as OpenClawConfig });
+      expect(result).toEqual({
+        models: [{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }],
+        complete: false,
+        source: "provider-discovery-partial",
+      });
     } finally {
       setLoggerOverride(null);
       resetLogger();
@@ -375,6 +381,29 @@ describe("loadModelCatalog", () => {
     expect(augmentCatalogMock).not.toHaveBeenCalled();
   });
 
+  it("reports persisted read-only rows as incomplete provenance", async () => {
+    readFileMock.mockResolvedValueOnce(
+      JSON.stringify({
+        providers: {
+          openai: {
+            models: [{ id: "gpt-5.5", name: "GPT-5.5" }],
+          },
+        },
+      }),
+    );
+
+    const result = await loadModelCatalogSnapshot({
+      config: {} as OpenClawConfig,
+      readOnly: true,
+    });
+
+    expect(result.complete).toBe(false);
+    expect(result.source).toBe("persisted-catalog");
+    expect(result.models).toContainEqual(
+      expect.objectContaining({ provider: "openai", id: "gpt-5.5" }),
+    );
+  });
+
   it("falls back to manifest catalog rows when persisted read-only catalog has no model rows", async () => {
     readFileMock.mockResolvedValueOnce(
       JSON.stringify({
@@ -420,7 +449,11 @@ describe("loadModelCatalog", () => {
     });
     __setModelCatalogImportForTest(importPiSdk as unknown as () => Promise<PiSdkModule>);
 
-    const result = await loadModelCatalog({ config: {} as OpenClawConfig, readOnly: true });
+    const snapshot = await loadModelCatalogSnapshot({
+      config: {} as OpenClawConfig,
+      readOnly: true,
+    });
+    const result = snapshot.models;
 
     expect(result).toEqual([
       {
@@ -433,6 +466,8 @@ describe("loadModelCatalog", () => {
     ]);
     expect(ensureOpenClawModelsJsonMock).not.toHaveBeenCalled();
     expect(importPiSdk).not.toHaveBeenCalled();
+    expect(snapshot.complete).toBe(false);
+    expect(snapshot.source).toBe("static-fallback");
   });
 
   it("preserves registry defaults for minimal persisted read-only catalog rows", async () => {

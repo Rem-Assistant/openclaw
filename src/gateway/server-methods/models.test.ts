@@ -26,7 +26,7 @@ describe("models.list", () => {
   it("does not block the configured view on slow model catalog discovery", async () => {
     const catalog = createDeferred<never>();
     const respond = vi.fn();
-    const loadGatewayModelCatalog = vi.fn(() => catalog.promise);
+    const loadGatewayModelCatalogSnapshot = vi.fn(() => catalog.promise);
 
     vi.useFakeTimers();
     try {
@@ -55,7 +55,7 @@ describe("models.list", () => {
             };
             return config as unknown as OpenClawConfig;
           },
-          loadGatewayModelCatalog,
+          loadGatewayModelCatalogSnapshot,
           logGateway: {
             debug: vi.fn(),
           },
@@ -80,16 +80,20 @@ describe("models.list", () => {
         },
         undefined,
       );
-      expect(loadGatewayModelCatalog).toHaveBeenCalledWith({ readOnly: true });
+      expect(loadGatewayModelCatalogSnapshot).toHaveBeenCalledWith({ readOnly: true });
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("keeps the all view exact instead of timing out to a partial catalog", async () => {
-    const catalog = createDeferred<[{ id: string; name: string; provider: string }]>();
+    const catalog = createDeferred<{
+      models: [{ id: string; name: string; provider: string }];
+      complete: boolean;
+      source: "provider-discovery";
+    }>();
     const respond = vi.fn();
-    const loadGatewayModelCatalog = vi.fn(() => catalog.promise);
+    const loadGatewayModelCatalogSnapshot = vi.fn(() => catalog.promise);
 
     vi.useFakeTimers();
     try {
@@ -106,7 +110,7 @@ describe("models.list", () => {
         isWebchatConnect: () => false,
         context: {
           getRuntimeConfig: () => ({}) as OpenClawConfig,
-          loadGatewayModelCatalog,
+          loadGatewayModelCatalogSnapshot,
           logGateway: {
             debug: vi.fn(),
           },
@@ -116,7 +120,11 @@ describe("models.list", () => {
       await vi.advanceTimersByTimeAsync(800);
       expect(respond).not.toHaveBeenCalled();
 
-      catalog.resolve([{ id: "gpt-test", name: "GPT Test", provider: "openai" }]);
+      catalog.resolve({
+        models: [{ id: "gpt-test", name: "GPT Test", provider: "openai" }],
+        complete: true,
+        source: "provider-discovery",
+      });
       await request;
 
       expect(respond).toHaveBeenCalledWith(
@@ -124,14 +132,57 @@ describe("models.list", () => {
         {
           models: [{ id: "gpt-test", name: "GPT Test", provider: "openai" }],
           catalogComplete: true,
-          catalogSource: "gateway-catalog",
+          catalogSource: "provider-discovery",
         },
         undefined,
       );
-      expect(loadGatewayModelCatalog).toHaveBeenCalledWith({ readOnly: false });
+      expect(loadGatewayModelCatalogSnapshot).toHaveBeenCalledWith({ readOnly: false });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("propagates persisted fallback provenance instead of marking it complete", async () => {
+    const respond = vi.fn();
+    const models = [{ id: "gpt-test", name: "GPT Test", provider: "openai" }];
+
+    await modelsHandlers["models.list"]({
+      req: {
+        type: "req",
+        id: "req-models-list-persisted-fallback",
+        method: "models.list",
+        params: { view: "configured" },
+      },
+      params: { view: "configured" },
+      respond,
+      client: null,
+      isWebchatConnect: () => false,
+      context: {
+        getRuntimeConfig: () =>
+          ({
+            models: {
+              providers: {
+                openai: {
+                  baseUrl: "https://openai.example.com",
+                  models: [{ id: "gpt-test", name: "GPT Test" }],
+                },
+              },
+            },
+          }) as unknown as OpenClawConfig,
+        loadGatewayModelCatalogSnapshot: vi.fn(async () => ({
+          models,
+          complete: false,
+          source: "persisted-catalog" as const,
+        })),
+        logGateway: { debug: vi.fn() },
+      } as never,
+    });
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      { models, catalogComplete: false, catalogSource: "persisted-catalog" },
+      undefined,
+    );
   });
 
   it("loads the full catalog for provider-scoped configured view and filters only providers", async () => {
@@ -160,7 +211,9 @@ describe("models.list", () => {
     } as unknown as OpenClawConfig;
 
     const configuredRespond = vi.fn();
-    const loadConfiguredCatalog = vi.fn(() => Promise.resolve(catalog));
+    const loadConfiguredCatalog = vi.fn(() =>
+      Promise.resolve({ models: catalog, complete: true, source: "provider-discovery" as const }),
+    );
     await modelsHandlers["models.list"]({
       req: {
         type: "req",
@@ -174,7 +227,7 @@ describe("models.list", () => {
       isWebchatConnect: () => false,
       context: {
         getRuntimeConfig: () => cfg,
-        loadGatewayModelCatalog: loadConfiguredCatalog,
+        loadGatewayModelCatalogSnapshot: loadConfiguredCatalog,
         logGateway: {
           debug: vi.fn(),
         },
@@ -191,7 +244,7 @@ describe("models.list", () => {
           { id: "qwen-local", name: "Qwen Local", provider: "vllm" },
         ],
         catalogComplete: true,
-        catalogSource: "gateway-catalog",
+        catalogSource: "provider-discovery",
       },
       undefined,
     );
@@ -211,7 +264,13 @@ describe("models.list", () => {
       isWebchatConnect: () => false,
       context: {
         getRuntimeConfig: () => cfg,
-        loadGatewayModelCatalog: vi.fn(() => Promise.resolve(catalog)),
+        loadGatewayModelCatalogSnapshot: vi.fn(() =>
+          Promise.resolve({
+            models: catalog,
+            complete: true,
+            source: "provider-discovery" as const,
+          }),
+        ),
         logGateway: {
           debug: vi.fn(),
         },
@@ -220,7 +279,7 @@ describe("models.list", () => {
 
     expect(allRespond).toHaveBeenCalledWith(
       true,
-      { models: catalog, catalogComplete: true, catalogSource: "gateway-catalog" },
+      { models: catalog, catalogComplete: true, catalogSource: "provider-discovery" },
       undefined,
     );
   });
@@ -241,7 +300,9 @@ describe("models.list", () => {
       isWebchatConnect: () => false,
       context: {
         getRuntimeConfig: () => ({}) as OpenClawConfig,
-        loadGatewayModelCatalog: vi.fn(() => Promise.reject(new Error("catalog failed"))),
+        loadGatewayModelCatalogSnapshot: vi.fn(() =>
+          Promise.reject(new Error("catalog failed")),
+        ),
         logGateway: {
           debug: vi.fn(),
         },

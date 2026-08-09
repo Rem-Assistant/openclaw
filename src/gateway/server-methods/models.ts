@@ -15,7 +15,9 @@ import type { GatewayRequestHandlers } from "./types.js";
 
 type ModelsListView = "default" | "configured" | "all";
 type GatewayModelCatalog = Awaited<ReturnType<GatewayRequestContext["loadGatewayModelCatalog"]>>;
-type ModelsListCatalogSource = "gateway-catalog" | "configured-fallback";
+type ModelsListCatalogSource =
+  | Awaited<ReturnType<GatewayRequestContext["loadGatewayModelCatalogSnapshot"]>>["source"]
+  | "configured-fallback";
 type ModelsListCatalogLoad = {
   catalog: GatewayModelCatalog;
   complete: boolean;
@@ -35,22 +37,16 @@ async function loadModelsListCatalog(
   cfg: OpenClawConfig,
 ): Promise<ModelsListCatalogLoad> {
   if (view === "all") {
-    return {
-      catalog: await context.loadGatewayModelCatalog({ readOnly: false }),
-      complete: true,
-      source: "gateway-catalog",
-    };
+    const result = await context.loadGatewayModelCatalogSnapshot({ readOnly: false });
+    return { catalog: result.models, complete: result.complete, source: result.source };
   }
   if (parseConfiguredModelVisibilityEntries({ cfg }).providerWildcards.size > 0) {
-    return {
-      catalog: await context.loadGatewayModelCatalog({ readOnly: false }),
-      complete: true,
-      source: "gateway-catalog",
-    };
+    const result = await context.loadGatewayModelCatalogSnapshot({ readOnly: false });
+    return { catalog: result.models, complete: result.complete, source: result.source };
   }
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = Symbol("models-list-catalog-timeout");
-  const catalogPromise = context.loadGatewayModelCatalog({ readOnly: true });
+  const catalogPromise = context.loadGatewayModelCatalogSnapshot({ readOnly: true });
   const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
     timeout = setTimeout(() => resolve(timedOut), MODELS_LIST_CATALOG_TIMEOUT_MS);
     timeout.unref?.();
@@ -67,7 +63,7 @@ async function loadModelsListCatalog(
       }
       return { catalog: [], complete: false, source: "configured-fallback" };
     }
-    return { catalog: result, complete: true, source: "gateway-catalog" };
+    return { catalog: result.models, complete: result.complete, source: result.source };
   } finally {
     if (timeout) {
       clearTimeout(timeout);

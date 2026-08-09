@@ -178,6 +178,8 @@ function loadGatewayCloseModule(): Promise<typeof import("./server-close.runtime
 }
 
 type LoadGatewayModelCatalog = typeof import("./server-model-catalog.js").loadGatewayModelCatalog;
+type LoadGatewayModelCatalogSnapshot =
+  typeof import("./server-model-catalog.js").loadGatewayModelCatalogSnapshot;
 
 let gatewayModelCatalogModulePromise: Promise<typeof import("./server-model-catalog.js")> | null =
   null;
@@ -186,6 +188,12 @@ const loadGatewayModelCatalog: LoadGatewayModelCatalog = async (...args) => {
   gatewayModelCatalogModulePromise ??= import("./server-model-catalog.js");
   const mod = await gatewayModelCatalogModulePromise;
   return mod.loadGatewayModelCatalog(...args);
+};
+
+const loadGatewayModelCatalogSnapshot: LoadGatewayModelCatalogSnapshot = async (...args) => {
+  gatewayModelCatalogModulePromise ??= import("./server-model-catalog.js");
+  const mod = await gatewayModelCatalogModulePromise;
+  return mod.loadGatewayModelCatalogSnapshot(...args);
 };
 
 const logHealth = log.child("health");
@@ -1237,6 +1245,7 @@ export async function startGatewayServer(
       execApprovalManager,
       pluginApprovalManager,
       loadGatewayModelCatalog,
+      loadGatewayModelCatalogSnapshot,
       getHealthCache,
       refreshHealthSnapshot: refreshGatewayHealthSnapshotWithRuntime,
       logHealth,

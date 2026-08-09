@@ -4,6 +4,7 @@ import type { GatewayModelChoice } from "./server-model-catalog.js";
 import {
   __resetModelCatalogCacheForTest,
   loadGatewayModelCatalog,
+  loadGatewayModelCatalogSnapshot,
   markGatewayModelCatalogStaleForReload,
 } from "./server-model-catalog.js";
 
@@ -49,6 +50,24 @@ describe("loadGatewayModelCatalog", () => {
 
     expect(loadModelCatalog).toHaveBeenCalledTimes(1);
     expect(loadModelCatalog).toHaveBeenCalledWith({ config: getConfig(), readOnly: true });
+  });
+
+  it("preserves loader completeness and provenance through the gateway cache", async () => {
+    const models = [model("configured-only")];
+    const loadModelCatalogSnapshot = vi.fn(async () => ({
+      models,
+      complete: false,
+      source: "persisted-catalog" as const,
+    }));
+
+    await expect(
+      loadGatewayModelCatalogSnapshot({ getConfig, loadModelCatalogSnapshot }),
+    ).resolves.toEqual({ models, complete: false, source: "persisted-catalog" });
+    await expect(
+      loadGatewayModelCatalogSnapshot({ getConfig, loadModelCatalogSnapshot }),
+    ).resolves.toEqual({ models, complete: false, source: "persisted-catalog" });
+
+    expect(loadModelCatalogSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it("keeps read-only and full catalog caches separate", async () => {

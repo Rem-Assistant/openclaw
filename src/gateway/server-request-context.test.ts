@@ -20,6 +20,11 @@ describe("createGatewayRequestContext", () => {
       execApprovalManager: undefined,
       pluginApprovalManager: undefined,
       loadGatewayModelCatalog: vi.fn(async () => []),
+      loadGatewayModelCatalogSnapshot: vi.fn(async () => ({
+        models: [],
+        complete: false,
+        source: "static-fallback" as const,
+      })),
       getHealthCache: vi.fn(() => null),
       refreshHealthSnapshot: vi.fn(async () => ({}) as never),
       logHealth: { error: vi.fn() },

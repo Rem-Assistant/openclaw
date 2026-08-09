@@ -1,21 +1,28 @@
 import { getRuntimeConfig } from "../config/io.js";
 
 export type GatewayModelChoice = import("../agents/model-catalog.js").ModelCatalogEntry;
+export type GatewayModelCatalogSnapshot =
+  import("../agents/model-catalog.js").ModelCatalogSnapshot;
 
 type GatewayModelCatalogConfig = ReturnType<typeof getRuntimeConfig>;
 type LoadModelCatalog = (params: {
   config: GatewayModelCatalogConfig;
   readOnly?: boolean;
 }) => Promise<GatewayModelChoice[]>;
+type LoadModelCatalogSnapshot = (params: {
+  config: GatewayModelCatalogConfig;
+  readOnly?: boolean;
+}) => Promise<GatewayModelCatalogSnapshot>;
 type LoadGatewayModelCatalogParams = {
   getConfig?: () => GatewayModelCatalogConfig;
   loadModelCatalog?: LoadModelCatalog;
+  loadModelCatalogSnapshot?: LoadModelCatalogSnapshot;
   readOnly?: boolean;
 };
 
 type GatewayModelCatalogCache = {
-  lastSuccessfulCatalog: GatewayModelChoice[] | null;
-  inFlightRefresh: Promise<GatewayModelChoice[]> | null;
+  lastSuccessfulCatalog: GatewayModelCatalogSnapshot | null;
+  inFlightRefresh: Promise<GatewayModelCatalogSnapshot> | null;
   staleGeneration: number;
   appliedGeneration: number;
 };
@@ -53,29 +60,40 @@ function isGatewayModelCatalogStale(cache: GatewayModelCatalogCache): boolean {
 
 async function resolveLoadModelCatalog(
   params?: LoadGatewayModelCatalogParams,
-): Promise<LoadModelCatalog> {
-  if (params?.loadModelCatalog) {
-    return params.loadModelCatalog;
+): Promise<LoadModelCatalogSnapshot> {
+  if (params?.loadModelCatalogSnapshot) {
+    return params.loadModelCatalogSnapshot;
   }
-  const { loadModelCatalog } = await import("../agents/model-catalog.js");
-  return loadModelCatalog;
+  if (params?.loadModelCatalog) {
+    const legacyLoadModelCatalog = params.loadModelCatalog;
+    return async (loadParams) => ({
+      models: await legacyLoadModelCatalog(loadParams),
+      complete: true,
+      source: "provider-discovery",
+    });
+  }
+  const { loadModelCatalogSnapshot } = await import("../agents/model-catalog.js");
+  return loadModelCatalogSnapshot;
 }
 
 function startGatewayModelCatalogRefresh(
   params?: LoadGatewayModelCatalogParams,
-): Promise<GatewayModelChoice[]> {
+): Promise<GatewayModelCatalogSnapshot> {
   const cache = resolveGatewayModelCatalogCache(params);
   const config = (params?.getConfig ?? getRuntimeConfig)();
   const readOnly = params?.readOnly !== false;
   const refreshGeneration = cache.staleGeneration;
   const refresh = resolveLoadModelCatalog(params)
     .then((loadModelCatalog) => loadModelCatalog({ config, readOnly }))
-    .then((catalog) => {
-      if ((readOnly || catalog.length > 0) && refreshGeneration === cache.staleGeneration) {
-        cache.lastSuccessfulCatalog = catalog;
+    .then((snapshot) => {
+      if (
+        (readOnly || snapshot.models.length > 0) &&
+        refreshGeneration === cache.staleGeneration
+      ) {
+        cache.lastSuccessfulCatalog = snapshot;
         cache.appliedGeneration = cache.staleGeneration;
       }
-      return catalog;
+      return snapshot;
     })
     .finally(() => {
       if (cache.inFlightRefresh === refresh) {
@@ -103,6 +121,12 @@ export async function __resetModelCatalogCacheForTest(): Promise<void> {
 export async function loadGatewayModelCatalog(
   params?: LoadGatewayModelCatalogParams,
 ): Promise<GatewayModelChoice[]> {
+  return (await loadGatewayModelCatalogSnapshot(params)).models;
+}
+
+export async function loadGatewayModelCatalogSnapshot(
+  params?: LoadGatewayModelCatalogParams,
+): Promise<GatewayModelCatalogSnapshot> {
   const cache = resolveGatewayModelCatalogCache(params);
   const isStale = isGatewayModelCatalogStale(cache);
   if (!isStale && cache.lastSuccessfulCatalog !== null) {

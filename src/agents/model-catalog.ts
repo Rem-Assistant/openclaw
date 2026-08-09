@@ -53,7 +53,20 @@ type PiRegistryClassLike = {
   new (authStorage: unknown, modelsFile: string): PiRegistryInstance;
 };
 
-let modelCatalogPromise: Promise<ModelCatalogEntry[]> | null = null;
+export type ModelCatalogLoadSource =
+  | "provider-discovery"
+  | "provider-discovery-partial"
+  | "provider-discovery-failed"
+  | "persisted-catalog"
+  | "static-fallback";
+
+export type ModelCatalogSnapshot = {
+  models: ModelCatalogEntry[];
+  complete: boolean;
+  source: ModelCatalogLoadSource;
+};
+
+let modelCatalogPromise: Promise<ModelCatalogSnapshot> | null = null;
 let hasLoggedModelCatalogError = false;
 let hasLoggedReadOnlyStaticCatalogError = false;
 const defaultImportPiSdk = () => import("./pi-model-discovery-runtime.js");
@@ -314,19 +327,27 @@ function loadReadOnlyStaticModelCatalog(params?: { config?: OpenClawConfig }): M
   return sortModelCatalogEntries(models);
 }
 
-export async function loadModelCatalog(params?: {
+export async function loadModelCatalogSnapshot(params?: {
   config?: OpenClawConfig;
   useCache?: boolean;
   readOnly?: boolean;
-}): Promise<ModelCatalogEntry[]> {
+}): Promise<ModelCatalogSnapshot> {
   const readOnly = params?.readOnly === true;
   if (readOnly) {
     try {
-      return await loadReadOnlyPersistedModelCatalog(params);
+      return {
+        models: await loadReadOnlyPersistedModelCatalog(params),
+        complete: false,
+        source: "persisted-catalog",
+      };
     } catch {
       // Keep gateway models.list on side-effect-free sources. The RPC timeout
       // cannot fire while provider discovery blocks the event loop.
-      return loadReadOnlyStaticModelCatalog(params);
+      return {
+        models: loadReadOnlyStaticModelCatalog(params),
+        complete: false,
+        source: "static-fallback",
+      };
     }
   }
   if (!readOnly && params?.useCache === false) {
@@ -455,7 +476,7 @@ export async function loadModelCatalog(params?: {
 
       const sorted = sortModels(models);
       logStage("complete", `entries=${sorted.length}`);
-      return sorted;
+      return { models: sorted, complete: true, source: "provider-discovery" };
     } catch (error) {
       if (!hasLoggedModelCatalogError) {
         hasLoggedModelCatalogError = true;
@@ -466,9 +487,13 @@ export async function loadModelCatalog(params?: {
         modelCatalogPromise = null;
       }
       if (models.length > 0) {
-        return sortModels(models);
+        return {
+          models: sortModels(models),
+          complete: false,
+          source: "provider-discovery-partial",
+        };
       }
-      return [];
+      return { models: [], complete: false, source: "provider-discovery-failed" };
     }
   };
 
@@ -478,6 +503,14 @@ export async function loadModelCatalog(params?: {
 
   modelCatalogPromise = loadCatalog();
   return modelCatalogPromise;
+}
+
+export async function loadModelCatalog(params?: {
+  config?: OpenClawConfig;
+  useCache?: boolean;
+  readOnly?: boolean;
+}): Promise<ModelCatalogEntry[]> {
+  return (await loadModelCatalogSnapshot(params)).models;
 }
 
 /**

@@ -209,7 +209,14 @@ export const ModelsListResultSchema = Type.Object(
     models: Type.Array(ModelChoiceSchema),
     catalogComplete: Type.Optional(Type.Boolean()),
     catalogSource: Type.Optional(
-      Type.Union([Type.Literal("gateway-catalog"), Type.Literal("configured-fallback")]),
+      Type.Union([
+        Type.Literal("provider-discovery"),
+        Type.Literal("provider-discovery-partial"),
+        Type.Literal("provider-discovery-failed"),
+        Type.Literal("persisted-catalog"),
+        Type.Literal("static-fallback"),
+        Type.Literal("configured-fallback"),
+      ]),
     ),
   },
   { additionalProperties: false },
