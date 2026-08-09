@@ -199,6 +199,8 @@ public final class OpenClawChatViewModel {
         beforeDispatch: @escaping @MainActor () async -> Bool = { true }
     ) {
         guard self.activeSendTask == nil else { return }
+        let acceptedSessionKey = self.sessionKey
+        let effectiveSelectionID = self.normalizedSelectionID(selectionID)
         let snapshot = AuthorizedSendSnapshot(
             sourceInput: self.input,
             sourceAttachments: self.attachments,
@@ -217,7 +219,11 @@ public final class OpenClawChatViewModel {
                     self.performSessionSwitch(to: queuedSessionKey)
                 }
             }
-            let effectiveSelectionID = self.normalizedSelectionID(selectionID)
+            // A picker patch may already be in flight when Send synchronously claims the turn.
+            // Wait for its authoritative result before quota. If it failed or resolved to a
+            // different model, repair the exact accepted selection and fail closed on failure.
+            await self.waitForPendingModelPatches(in: acceptedSessionKey)
+            guard self.sessionKey == acceptedSessionKey else { return }
             if effectiveSelectionID != self.modelSelectionID {
                 await self.performSelectModel(effectiveSelectionID, allowDuringSendPreparation: true)
                 guard self.modelSelectionID == effectiveSelectionID else { return }

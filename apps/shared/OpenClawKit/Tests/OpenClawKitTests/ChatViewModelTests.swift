@@ -1771,6 +1771,53 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
     }
 
+    @Test func authorizedSendDoesNotChargeWhenAcceptedInFlightModelPatchFails() async throws {
+        let modelPatchGate = AsyncGate()
+        let modelPatchAttempts = AsyncCounter()
+        let beforeDispatchCount = AsyncCounter()
+        let openAIModel = modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai")
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            modelResponses: [[openAIModel]],
+            setSessionModelHook: { _ in
+                if await modelPatchAttempts.increment() == 1 {
+                    await modelPatchGate.wait()
+                }
+                throw NSError(
+                    domain: "test",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "patch failed"])
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run { vm.selectModel(openAIModel.selectionID) }
+        try await waitUntil("accepted model patch starts") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
+        }
+        await MainActor.run {
+            #expect(vm.modelSelectionID == openAIModel.selectionID)
+            vm.input = "do not charge fallback"
+            vm.send(modelSelectionID: openAIModel.selectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+        }
+        #expect(await MainActor.run { vm.isPreparingSend })
+        #expect(await beforeDispatchCount.current() == 0)
+        await modelPatchGate.open()
+
+        try await waitUntil("failed accepted model repair settles") {
+            await MainActor.run { !vm.isPreparingSend }
+        }
+        #expect(await transport.patchedModels() == ["openai/gpt-5.4", "openai/gpt-5.4"])
+        #expect(await beforeDispatchCount.current() == 0)
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.input } == "do not charge fallback")
+        #expect(await MainActor.run {
+            vm.modelSelectionID == OpenClawChatViewModel.defaultModelSelectionID
+        })
+    }
+
     @Test func authorizedSendRejectsDuplicatePreDispatchWorkWhileModelRepairIsInFlight() async throws {
         let now = Date().timeIntervalSince1970 * 1000
         let beforeDispatchCount = AsyncCounter()
