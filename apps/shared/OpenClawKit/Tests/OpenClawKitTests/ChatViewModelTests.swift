@@ -280,6 +280,8 @@ private actor TestChatTransportState {
     var resetSessionKeys: [String] = []
     var compactSessionKeys: [String] = []
     var sentRunIds: [String] = []
+    var sentMessages: [String] = []
+    var sentAttachmentFileNames: [[String]] = []
     var sentThinkingLevels: [String] = []
     var abortedRunIds: [String] = []
     var patchedModels: [String?] = []
@@ -367,12 +369,14 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
 
     func sendMessage(
         sessionKey _: String,
-        message _: String,
+        message: String,
         thinking: String,
         idempotencyKey: String,
-        attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
+        attachments: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
         await self.state.sentRunIdsAppend(idempotencyKey)
+        await self.state.sentMessagesAppend(message)
+        await self.state.sentAttachmentFileNamesAppend(attachments.map(\.fileName))
         await self.state.sentThinkingLevelsAppend(thinking)
         if let sendMessageHook = self.sendMessageHook {
             return try await sendMessageHook(idempotencyKey)
@@ -471,6 +475,14 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         await self.state.sentThinkingLevels
     }
 
+    func sentMessages() async -> [String] {
+        await self.state.sentMessages
+    }
+
+    func sentAttachmentFileNames() async -> [[String]] {
+        await self.state.sentAttachmentFileNames
+    }
+
     func patchedModels() async -> [String?] {
         await self.state.patchedModels
     }
@@ -511,6 +523,14 @@ extension TestChatTransportState {
 
     fileprivate func sentRunIdsAppend(_ v: String) {
         self.sentRunIds.append(v)
+    }
+
+    fileprivate func sentMessagesAppend(_ v: String) {
+        self.sentMessages.append(v)
+    }
+
+    fileprivate func sentAttachmentFileNamesAppend(_ v: [String]) {
+        self.sentAttachmentFileNames.append(v)
     }
 
     fileprivate func abortedRunIdsAppend(_ v: String) {
@@ -1677,6 +1697,7 @@ extension TestChatTransportState {
 
     @Test func authorizedSendResetsUnavailableSessionOverrideBeforeDispatch() async throws {
         let now = Date().timeIntervalSince1970 * 1000
+        let beforeDispatchCount = AsyncCounter()
         let (transport, vm) = await makeViewModel(
             historyResponses: [historyPayload()],
             sessionsResponses: [
@@ -1694,7 +1715,10 @@ extension TestChatTransportState {
 
         await MainActor.run {
             vm.input = "Use an available model"
-            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID)
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
         }
 
         try await waitUntil("default patch and send complete") {
@@ -1702,11 +1726,13 @@ extension TestChatTransportState {
             let sentRunID = await transport.lastSentRunId()
             return patchedModels == [nil] && sentRunID != nil
         }
+        #expect(await beforeDispatchCount.current() == 1)
         #expect(await MainActor.run { vm.modelSelectionID } == OpenClawChatViewModel.defaultModelSelectionID)
     }
 
     @Test func authorizedSendFailsClosedWhenDefaultResetFails() async throws {
         let now = Date().timeIntervalSince1970 * 1000
+        let beforeDispatchCount = AsyncCounter()
         let (transport, vm) = await makeViewModel(
             historyResponses: [historyPayload()],
             sessionsResponses: [
@@ -1727,16 +1753,172 @@ extension TestChatTransportState {
 
         await MainActor.run {
             vm.input = "Do not send with stale override"
-            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID)
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
         }
 
         try await waitUntil("default patch fails") {
             await transport.patchedModels() == [nil]
         }
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil("authorized send preparation ends") {
+            await MainActor.run { !vm.isPreparingSend }
+        }
+        #expect(await beforeDispatchCount.current() == 0)
         #expect(await transport.lastSentRunId() == nil)
         #expect(await MainActor.run { vm.input } == "Do not send with stale override")
         #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
+    }
+
+    @Test func authorizedSendRejectsDuplicatePreDispatchWorkWhileModelRepairIsInFlight() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let beforeDispatchCount = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [
+                OpenClawChatSessionsListResponse(
+                    ts: now,
+                    path: nil,
+                    count: 1,
+                    defaults: nil,
+                    sessions: [
+                        sessionEntry(
+                            key: "main",
+                            updatedAt: now,
+                            model: "claude-opus-4-6",
+                            modelProvider: "anthropic"),
+                    ])
+            ],
+            modelResponses: [[modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6")]],
+            setSessionModelHook: { _ in
+                try await Task.sleep(for: .milliseconds(150))
+            })
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "Charge once"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+            #expect(vm.isPreparingSend)
+            #expect(!vm.canSend)
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+        }
+
+        try await waitUntil("single repair and send complete") {
+            let patchedModels = await transport.patchedModels()
+            let sentRunID = await transport.lastSentRunId()
+            return patchedModels == [nil] && sentRunID != nil
+        }
+        #expect(await beforeDispatchCount.current() == 1)
+    }
+
+    @Test func authorizedSendQueuesNavigationUntilDeniedPreDispatchWorkSettles() async throws {
+        let gate = AsyncGate()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(sessionKey: "main"), historyPayload(sessionKey: "other")])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "Keep this draft on main"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                await gate.wait()
+                return false
+            }
+        }
+        try await waitUntil("pre-dispatch work starts") {
+            await MainActor.run { vm.isPreparingSend }
+        }
+
+        await MainActor.run { vm.switchSession(to: "other") }
+        #expect(await MainActor.run { vm.sessionKey } == "main")
+        await gate.open()
+
+        try await waitUntil("denied send settles on requested destination") {
+            await MainActor.run { vm.sessionKey == "other" && !vm.isLoading && !vm.isPreparingSend }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.input.isEmpty })
+        await MainActor.run { vm.switchSession(to: "main") }
+        #expect(await MainActor.run { vm.input } == "Keep this draft on main")
+    }
+
+    @Test func authorizedSendUsesSynchronousPayloadSnapshotAndPreservesLaterDraftEdits() async throws {
+        let preDispatchStarted = AsyncGate()
+        let allowDispatch = AsyncGate()
+        let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+        let originalAttachment = OpenClawPendingAttachment(
+            url: nil,
+            data: Data("old".utf8),
+            fileName: "old.txt",
+            mimeType: "text/plain",
+            preview: nil)
+        let replacementAttachment = OpenClawPendingAttachment(
+            url: nil,
+            data: Data("new".utf8),
+            fileName: "new.txt",
+            mimeType: "text/plain",
+            preview: nil)
+
+        await MainActor.run {
+            vm.input = "original draft"
+            vm.attachments = [originalAttachment]
+            vm.send(
+                modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID,
+                message: "wrapped original draft",
+                attachments: [originalAttachment]
+            ) {
+                await preDispatchStarted.open()
+                await allowDispatch.wait()
+                return true
+            }
+        }
+        await preDispatchStarted.wait()
+        await MainActor.run {
+            vm.input = "replacement draft"
+            vm.attachments = [replacementAttachment]
+        }
+        await allowDispatch.open()
+
+        try await waitUntil("snapshotted send completes") {
+            await transport.lastSentRunId() != nil
+        }
+        #expect(await transport.sentMessages() == ["wrapped original draft"])
+        #expect(await transport.sentAttachmentFileNames() == [["old.txt"]])
+        #expect(await MainActor.run { vm.input } == "replacement draft")
+        #expect(await MainActor.run { vm.attachments.map(\.fileName) } == ["new.txt"])
+    }
+
+    @Test func authorizedSendDoesNotConsumePreDispatchWorkWhenHealthRejectsPayload() async throws {
+        let beforeDispatchCount = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            requestHealthHook: { false })
+        await MainActor.run { vm.load() }
+        try await waitUntil("unhealthy bootstrap completes") {
+            let historyLoaded = await transport.historyCallCount() == 1
+            let loadingFinished = await MainActor.run { !vm.isLoading }
+            return historyLoaded && loadingFinished
+        }
+
+        await MainActor.run {
+            vm.input = "Keep this uncharged"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                _ = await beforeDispatchCount.increment()
+                return true
+            }
+        }
+        try await waitUntil("health-rejected send preparation ends") {
+            await MainActor.run { !vm.isPreparingSend }
+        }
+        #expect(await beforeDispatchCount.current() == 0)
+        #expect(await MainActor.run { vm.input } == "Keep this uncharged")
     }
 
     @Test func selectingProviderQualifiedModelDisambiguatesDuplicateModelIDs() async throws {

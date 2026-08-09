@@ -25,6 +25,10 @@ public final class OpenClawChatViewModel {
     public private(set) var modelSelectionID: String = "__default__"
     public private(set) var modelChoices: [OpenClawChatModelChoice] = []
     public private(set) var isLoading = false
+    /// True from the synchronous acceptance of an authorized send until model reconciliation and
+    /// its caller-supplied pre-dispatch work have finished. Unlike `isSending`, this covers the
+    /// network window before a chat run exists so composer UIs can reject duplicate quota charges.
+    public private(set) var isPreparingSend = false
     public private(set) var isSending = false
     public private(set) var isAborting = false
     public var errorText: String?
@@ -65,6 +69,13 @@ public final class OpenClawChatViewModel {
     private var queuedSessionKeyAfterSend: String?
     private struct ComposerDraft {
         var input: String
+        var attachments: [OpenClawPendingAttachment]
+    }
+    /// Immutable composer payload captured synchronously when an authorized send is accepted.
+    /// Model repair and quota authorization may suspend, so neither may read a later user edit.
+    private struct AuthorizedSendSnapshot {
+        var sourceInput: String
+        var message: String
         var attachments: [OpenClawPendingAttachment]
     }
     private var composerDraftsBySession: [String: ComposerDraft] = [:]
@@ -170,17 +181,34 @@ public final class OpenClawChatViewModel {
     /// Reconciles a caller-authorized model selection before sending. If the session retained an
     /// explicit override that the caller can no longer offer, the reset-to-default patch must
     /// succeed before any message is dispatched; a failed patch therefore fails closed.
-    public func send(modelSelectionID selectionID: String) {
+    public func send(
+        modelSelectionID selectionID: String,
+        message: String? = nil,
+        attachments: [OpenClawPendingAttachment]? = nil,
+        beforeDispatch: @escaping @MainActor () async -> Bool = { true }
+    ) {
         guard self.activeSendTask == nil else { return }
+        let snapshot = AuthorizedSendSnapshot(
+            sourceInput: self.input,
+            message: message ?? self.input,
+            attachments: attachments ?? self.attachments)
+        self.isPreparingSend = true
         self.activeSendTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.activeSendTask = nil }
+            defer {
+                self.activeSendTask = nil
+                self.isPreparingSend = false
+                if !self.isSending, let queuedSessionKey = self.queuedSessionKeyAfterSend {
+                    self.queuedSessionKeyAfterSend = nil
+                    self.performSessionSwitch(to: queuedSessionKey)
+                }
+            }
             let effectiveSelectionID = self.normalizedSelectionID(selectionID)
             if effectiveSelectionID != self.modelSelectionID {
                 await self.performSelectModel(effectiveSelectionID)
                 guard self.modelSelectionID == effectiveSelectionID else { return }
             }
-            await self.performSend()
+            await self.performSend(snapshot: snapshot, beforeDispatch: beforeDispatch)
         }
     }
 
@@ -205,7 +233,7 @@ public final class OpenClawChatViewModel {
         // Once Send is accepted, finish preparation and transport acknowledgement against the
         // captured conversation before changing the shared transcript. This prevents both silent
         // message loss and old-run activity from appearing in the destination during bootstrap.
-        if self.isSending {
+        if self.isPreparingSend || self.isSending {
             // The latest tap is authoritative. Returning to the source conversation cancels an
             // earlier queued destination instead of unexpectedly navigating after Send settles.
             self.queuedSessionKeyAfterSend = next == self.sessionKey ? nil : next
@@ -325,7 +353,8 @@ public final class OpenClawChatViewModel {
 
     public var canSend: Bool {
         let trimmed = self.input.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !self.isSending && self.pendingRunCount == 0 && (!trimmed.isEmpty || !self.attachments.isEmpty)
+        return !self.isPreparingSend && !self.isSending && self.pendingRunCount == 0 &&
+            (!trimmed.isEmpty || !self.attachments.isEmpty)
     }
 
     // MARK: - Internals
@@ -696,18 +725,24 @@ public final class OpenClawChatViewModel {
     private static let resetTriggers: Set<String> = ["/new", "/reset", "/clear"]
     private static let compactTriggers: Set<String> = ["/compact"]
 
-    private func performSend() async {
+    private func performSend(
+        snapshot: AuthorizedSendSnapshot? = nil,
+        beforeDispatch: @MainActor () async -> Bool = { true }
+    ) async {
         guard !self.isSending else { return }
-        let trimmed = self.input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !self.attachments.isEmpty else { return }
+        let sourceInput = snapshot?.sourceInput ?? self.input
+        let composerInput = snapshot?.message ?? self.input
+        let attachments = snapshot?.attachments ?? self.attachments
+        let trimmed = composerInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
 
         if Self.resetTriggers.contains(trimmed.lowercased()) {
-            self.input = ""
+            if self.input == sourceInput { self.input = "" }
             await self.performReset()
             return
         }
         if Self.compactTriggers.contains(trimmed.lowercased()) {
-            self.input = ""
+            if self.input == sourceInput { self.input = "" }
             await self.performCompact()
             return
         }
@@ -719,12 +754,23 @@ public final class OpenClawChatViewModel {
             return
         }
 
-        let composerInput = self.input
-        let attachments = self.attachments
         let sessionRequest = self.currentSessionRequest()
-        let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         self.isSending = true
         self.errorText = nil
+        defer {
+            self.isSending = false
+            if let queuedSessionKey = self.queuedSessionKeyAfterSend {
+                self.queuedSessionKeyAfterSend = nil
+                self.performSessionSwitch(to: queuedSessionKey)
+            }
+        }
+
+        // All local dispatch guards have accepted the immutable payload. Only now may a caller
+        // consume quota or clear view-local capability state. A rejection leaves the composer and
+        // navigation untouched; an edit made while this closure suspends remains the next draft.
+        guard await beforeDispatch() else { return }
+
+        let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         let runId = UUID().uuidString
         let messageText = trimmed.isEmpty && !attachments.isEmpty ? "See attached." : trimmed
         let thinkingLevel = self.thinkingLevel
@@ -735,16 +781,9 @@ public final class OpenClawChatViewModel {
         self.streamingAssistantText = nil
         // Snapshot and clear the composer before the first suspension point. Diagnostic hooks
         // must never cause a later continuation to erase a draft or attachment added meanwhile.
-        self.input = ""
-        self.attachments = []
-        defer {
-            self.preparingRuns.remove(runId)
-            self.isSending = false
-            if let queuedSessionKey = self.queuedSessionKeyAfterSend {
-                self.queuedSessionKeyAfterSend = nil
-                self.performSessionSwitch(to: queuedSessionKey)
-            }
-        }
+        if self.input == sourceInput { self.input = "" }
+        if self.attachments.map(\.id) == attachments.map(\.id) { self.attachments = [] }
+        defer { self.preparingRuns.remove(runId) }
 
         // Append without awaiting diagnostics so clearing the composer always has immediate,
         // visible feedback. The captured monotonic start still includes encoding and UI work.
@@ -843,7 +882,7 @@ public final class OpenClawChatViewModel {
                 // Restore the captured composer as one unit only when the user has not started a
                 // replacement draft. Mixing old text or attachments with new work can leak data.
                 if self.input.isEmpty, self.attachments.isEmpty {
-                    self.input = composerInput
+                    self.input = sourceInput
                     self.attachments = attachments
                 }
             }
@@ -854,7 +893,7 @@ public final class OpenClawChatViewModel {
                self.input.isEmpty,
                self.attachments.isEmpty
             {
-                self.input = composerInput
+                self.input = sourceInput
                 self.attachments = attachments
             }
             self.clearPendingRun(runId)
