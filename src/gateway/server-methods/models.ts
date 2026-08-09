@@ -15,6 +15,12 @@ import type { GatewayRequestHandlers } from "./types.js";
 
 type ModelsListView = "default" | "configured" | "all";
 type GatewayModelCatalog = Awaited<ReturnType<GatewayRequestContext["loadGatewayModelCatalog"]>>;
+type ModelsListCatalogSource = "gateway-catalog" | "configured-fallback";
+type ModelsListCatalogLoad = {
+  catalog: GatewayModelCatalog;
+  complete: boolean;
+  source: ModelsListCatalogSource;
+};
 
 const MODELS_LIST_CATALOG_TIMEOUT_MS = 750;
 let loggedSlowModelsListCatalog = false;
@@ -27,12 +33,20 @@ async function loadModelsListCatalog(
   context: GatewayRequestContext,
   view: ModelsListView,
   cfg: OpenClawConfig,
-): Promise<GatewayModelCatalog> {
+): Promise<ModelsListCatalogLoad> {
   if (view === "all") {
-    return await context.loadGatewayModelCatalog({ readOnly: false });
+    return {
+      catalog: await context.loadGatewayModelCatalog({ readOnly: false }),
+      complete: true,
+      source: "gateway-catalog",
+    };
   }
   if (parseConfiguredModelVisibilityEntries({ cfg }).providerWildcards.size > 0) {
-    return await context.loadGatewayModelCatalog({ readOnly: false });
+    return {
+      catalog: await context.loadGatewayModelCatalog({ readOnly: false }),
+      complete: true,
+      source: "gateway-catalog",
+    };
   }
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = Symbol("models-list-catalog-timeout");
@@ -51,9 +65,9 @@ async function loadModelsListCatalog(
           `models.list continuing without model catalog after ${MODELS_LIST_CATALOG_TIMEOUT_MS}ms`,
         );
       }
-      return [];
+      return { catalog: [], complete: false, source: "configured-fallback" };
     }
-    return result;
+    return { catalog: result, complete: true, source: "gateway-catalog" };
   } finally {
     if (timeout) {
       clearTimeout(timeout);
@@ -80,20 +94,24 @@ export const modelsHandlers: GatewayRequestHandlers = {
         resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg)) ??
         resolveDefaultAgentWorkspaceDir();
       const view = resolveModelsListView(params);
-      const catalog = await loadModelsListCatalog(context, view, cfg);
+      const catalogLoad = await loadModelsListCatalog(context, view, cfg);
+      const catalogMetadata = {
+        catalogComplete: catalogLoad.complete,
+        catalogSource: catalogLoad.source,
+      };
       if (view === "all") {
-        respond(true, { models: catalog }, undefined);
+        respond(true, { models: catalogLoad.catalog, ...catalogMetadata }, undefined);
         return;
       }
       const models = resolveVisibleModelCatalog({
         cfg,
-        catalog,
+        catalog: catalogLoad.catalog,
         defaultProvider: DEFAULT_PROVIDER,
         workspaceDir,
         view,
         runtimeAuthDiscovery: false,
       });
-      respond(true, { models }, undefined);
+      respond(true, { models, ...catalogMetadata }, undefined);
     } catch (err) {
       respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)));
     }

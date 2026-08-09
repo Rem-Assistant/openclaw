@@ -91,6 +91,8 @@ private func makeViewModel(
     sessionsResponses: [OpenClawChatSessionsListResponse] = [],
     modelResponses: [[OpenClawChatModelChoice]] = [],
     modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])? = nil,
+    modelCatalogCompleteness: OpenClawChatModelCatalogCompleteness = .unknown,
+    modelCatalogProvenance: String? = nil,
     resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -107,6 +109,8 @@ private func makeViewModel(
         sessionsResponses: sessionsResponses,
         modelResponses: modelResponses,
         modelRequestHook: modelRequestHook,
+        modelCatalogCompleteness: modelCatalogCompleteness,
+        modelCatalogProvenance: modelCatalogProvenance,
         resetSessionHook: resetSessionHook,
         compactSessionHook: compactSessionHook,
         setSessionModelHook: setSessionModelHook,
@@ -301,6 +305,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)?
     private let modelResponses: [[OpenClawChatModelChoice]]
     private let modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])?
+    private let modelCatalogCompleteness: OpenClawChatModelCatalogCompleteness
+    private let modelCatalogProvenance: String?
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
@@ -320,6 +326,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         sessionsRequestHook: (@Sendable (Int?) async throws -> OpenClawChatSessionsListResponse)? = nil,
         modelResponses: [[OpenClawChatModelChoice]] = [],
         modelRequestHook: (@Sendable () async throws -> [OpenClawChatModelChoice])? = nil,
+        modelCatalogCompleteness: OpenClawChatModelCatalogCompleteness = .unknown,
+        modelCatalogProvenance: String? = nil,
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -335,6 +343,8 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.sessionsRequestHook = sessionsRequestHook
         self.modelResponses = modelResponses
         self.modelRequestHook = modelRequestHook
+        self.modelCatalogCompleteness = modelCatalogCompleteness
+        self.modelCatalogProvenance = modelCatalogProvenance
         self.resetSessionHook = resetSessionHook
         self.compactSessionHook = compactSessionHook
         self.setSessionModelHook = setSessionModelHook
@@ -432,6 +442,13 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
             return self.modelResponses[idx]
         }
         return self.modelResponses.last ?? []
+    }
+
+    func listModelCatalog() async throws -> OpenClawChatModelCatalogSnapshot {
+        OpenClawChatModelCatalogSnapshot(
+            models: try await self.listModels(),
+            completeness: self.modelCatalogCompleteness,
+            provenance: self.modelCatalogProvenance)
     }
 
     func setSessionModel(sessionKey _: String, model: String?) async throws {
@@ -1700,6 +1717,19 @@ extension TestChatTransportState {
 
         #expect(await MainActor.run { vm.modelChoices.isEmpty })
         #expect(await MainActor.run { vm.modelSelectionID } == "anthropic/claude-opus-4-6")
+    }
+
+    @Test func publishesModelCatalogCompletenessAndProvenanceFromTransport() async throws {
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            modelResponses: [[modelChoice(id: "managed", name: "Managed", provider: "gmi")]],
+            modelCatalogCompleteness: .incomplete,
+            modelCatalogProvenance: "configured-fallback")
+
+        try await loadAndWaitBootstrap(vm: vm)
+
+        #expect(await MainActor.run { vm.modelCatalogCompleteness } == .incomplete)
+        #expect(await MainActor.run { vm.modelCatalogProvenance } == "configured-fallback")
     }
 
     @Test func selectingDefaultModelPatchesNilAndUpdatesSelection() async throws {

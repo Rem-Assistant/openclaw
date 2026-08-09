@@ -20,9 +20,32 @@ public enum OpenClawChatSendPreparationPhase: String, Sendable {
     case modelPatchWaitEnded
 }
 
+public enum OpenClawChatModelCatalogCompleteness: String, Codable, Sendable {
+    case complete
+    case incomplete
+    case unknown
+}
+
+public struct OpenClawChatModelCatalogSnapshot: Sendable {
+    public let models: [OpenClawChatModelChoice]
+    public let completeness: OpenClawChatModelCatalogCompleteness
+    public let provenance: String?
+
+    public init(
+        models: [OpenClawChatModelChoice],
+        completeness: OpenClawChatModelCatalogCompleteness,
+        provenance: String? = nil)
+    {
+        self.models = models
+        self.completeness = completeness
+        self.provenance = provenance
+    }
+}
+
 public protocol OpenClawChatTransport: Sendable {
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload
     func listModels() async throws -> [OpenClawChatModelChoice]
+    func listModelCatalog() async throws -> OpenClawChatModelCatalogSnapshot
     func sendMessage(
         sessionKey: String,
         message: String,
@@ -95,6 +118,12 @@ extension OpenClawChatTransport {
             domain: "OpenClawChatTransport",
             code: 0,
             userInfo: [NSLocalizedDescriptionKey: "models.list not supported by this transport"])
+    }
+
+    public func listModelCatalog() async throws -> OpenClawChatModelCatalogSnapshot {
+        OpenClawChatModelCatalogSnapshot(
+            models: try await self.listModels(),
+            completeness: .unknown)
     }
 
     public func setSessionModel(sessionKey _: String, model _: String?) async throws {

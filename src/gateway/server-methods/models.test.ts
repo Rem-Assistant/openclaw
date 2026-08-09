@@ -75,6 +75,8 @@ describe("models.list", () => {
               provider: "openai",
             },
           ],
+          catalogComplete: false,
+          catalogSource: "configured-fallback",
         },
         undefined,
       );
@@ -119,7 +121,11 @@ describe("models.list", () => {
 
       expect(respond).toHaveBeenCalledWith(
         true,
-        { models: [{ id: "gpt-test", name: "GPT Test", provider: "openai" }] },
+        {
+          models: [{ id: "gpt-test", name: "GPT Test", provider: "openai" }],
+          catalogComplete: true,
+          catalogSource: "gateway-catalog",
+        },
         undefined,
       );
       expect(loadGatewayModelCatalog).toHaveBeenCalledWith({ readOnly: false });
@@ -184,6 +190,8 @@ describe("models.list", () => {
           { id: "llama-local", name: "Llama Local", provider: "vllm" },
           { id: "qwen-local", name: "Qwen Local", provider: "vllm" },
         ],
+        catalogComplete: true,
+        catalogSource: "gateway-catalog",
       },
       undefined,
     );
@@ -210,7 +218,11 @@ describe("models.list", () => {
       } as never,
     });
 
-    expect(allRespond).toHaveBeenCalledWith(true, { models: catalog }, undefined);
+    expect(allRespond).toHaveBeenCalledWith(
+      true,
+      { models: catalog, catalogComplete: true, catalogSource: "gateway-catalog" },
+      undefined,
+    );
   });
 
   it("preserves catalog load errors before the timeout fallback wins", async () => {

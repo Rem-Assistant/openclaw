@@ -207,6 +207,10 @@ export const ModelsListParamsSchema = Type.Object(
 export const ModelsListResultSchema = Type.Object(
   {
     models: Type.Array(ModelChoiceSchema),
+    catalogComplete: Type.Optional(Type.Boolean()),
+    catalogSource: Type.Optional(
+      Type.Union([Type.Literal("gateway-catalog"), Type.Literal("configured-fallback")]),
+    ),
   },
   { additionalProperties: false },
 );

@@ -26,6 +26,8 @@ public final class OpenClawChatViewModel {
     public private(set) var thinkingLevelOptions: [OpenClawChatThinkingLevelOption]
     public private(set) var modelSelectionID: String = "__default__"
     public private(set) var modelChoices: [OpenClawChatModelChoice] = []
+    public private(set) var modelCatalogCompleteness: OpenClawChatModelCatalogCompleteness = .unknown
+    public private(set) var modelCatalogProvenance: String?
     public private(set) var isLoading = false
     /// True from the synchronous acceptance of an authorized send until model reconciliation and
     /// its caller-supplied pre-dispatch work have finished. Unlike `isSending`, this covers the
@@ -1037,9 +1039,11 @@ public final class OpenClawChatViewModel {
     private func fetchModels(bootstrapRequest: BootstrapRequest? = nil) async {
         if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
         do {
-            let choices = try await self.transport.listModels()
+            let catalog = try await self.transport.listModelCatalog()
             if let bootstrapRequest, !self.isCurrentBootstrap(bootstrapRequest) { return }
-            self.modelChoices = choices
+            self.modelChoices = catalog.models
+            self.modelCatalogCompleteness = catalog.completeness
+            self.modelCatalogProvenance = catalog.provenance
             self.syncSelectedModel()
         } catch {
             // Best-effort.
