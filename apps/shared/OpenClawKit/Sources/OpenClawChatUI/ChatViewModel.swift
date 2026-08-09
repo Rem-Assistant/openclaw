@@ -19,7 +19,9 @@ public final class OpenClawChatViewModel {
     public static let defaultModelSelectionID = "__default__"
 
     public private(set) var messages: [OpenClawChatMessage] = []
-    public var input: String = ""
+    public var input: String = "" {
+        didSet { self.composerMutationRevision &+= 1 }
+    }
     public private(set) var thinkingLevel: String
     public private(set) var thinkingLevelOptions: [OpenClawChatThinkingLevelOption]
     public private(set) var modelSelectionID: String = "__default__"
@@ -32,7 +34,9 @@ public final class OpenClawChatViewModel {
     public private(set) var isSending = false
     public private(set) var isAborting = false
     public var errorText: String?
-    public var attachments: [OpenClawPendingAttachment] = []
+    public var attachments: [OpenClawPendingAttachment] = [] {
+        didSet { self.composerMutationRevision &+= 1 }
+    }
     public private(set) var healthOK: Bool = false
     public private(set) var pendingRunCount: Int = 0
 
@@ -75,9 +79,16 @@ public final class OpenClawChatViewModel {
     /// Model repair and quota authorization may suspend, so neither may read a later user edit.
     private struct AuthorizedSendSnapshot {
         var sourceInput: String
+        var sourceAttachments: [OpenClawPendingAttachment]
+        var sourceComposerMutationRevision: UInt64
         var message: String
         var attachments: [OpenClawPendingAttachment]
+        var thinkingLevel: String
     }
+    /// Monotonic ownership token for the whole composer. Text and attachments form one draft:
+    /// if either changes while send preparation suspends, that newer draft must never be cleared
+    /// or combined with restored pieces from the accepted payload.
+    private var composerMutationRevision: UInt64 = 0
     private var composerDraftsBySession: [String: ComposerDraft] = [:]
     private var sessionRefreshCount = 0
     private var nextSessionListRequestID: UInt64 = 0
@@ -190,8 +201,11 @@ public final class OpenClawChatViewModel {
         guard self.activeSendTask == nil else { return }
         let snapshot = AuthorizedSendSnapshot(
             sourceInput: self.input,
+            sourceAttachments: self.attachments,
+            sourceComposerMutationRevision: self.composerMutationRevision,
             message: message ?? self.input,
-            attachments: attachments ?? self.attachments)
+            attachments: attachments ?? self.attachments,
+            thinkingLevel: self.thinkingLevel)
         self.isPreparingSend = true
         self.activeSendTask = Task { [weak self] in
             guard let self else { return }
@@ -205,7 +219,7 @@ public final class OpenClawChatViewModel {
             }
             let effectiveSelectionID = self.normalizedSelectionID(selectionID)
             if effectiveSelectionID != self.modelSelectionID {
-                await self.performSelectModel(effectiveSelectionID)
+                await self.performSelectModel(effectiveSelectionID, allowDuringSendPreparation: true)
                 guard self.modelSelectionID == effectiveSelectionID else { return }
             }
             await self.performSend(snapshot: snapshot, beforeDispatch: beforeDispatch)
@@ -264,10 +278,12 @@ public final class OpenClawChatViewModel {
     }
 
     public func selectThinkingLevel(_ level: String) {
+        guard !self.isPreparingSend, !self.isSending else { return }
         Task { await self.performSelectThinkingLevel(level) }
     }
 
     public func selectModel(_ selectionID: String) {
+        guard !self.isPreparingSend, !self.isSending else { return }
         Task { await self.performSelectModel(selectionID) }
     }
 
@@ -731,18 +747,22 @@ public final class OpenClawChatViewModel {
     ) async {
         guard !self.isSending else { return }
         let sourceInput = snapshot?.sourceInput ?? self.input
+        let sourceAttachments = snapshot?.sourceAttachments ?? self.attachments
+        let sourceComposerMutationRevision = snapshot?.sourceComposerMutationRevision
+            ?? self.composerMutationRevision
         let composerInput = snapshot?.message ?? self.input
         let attachments = snapshot?.attachments ?? self.attachments
+        let thinkingLevel = snapshot?.thinkingLevel ?? self.thinkingLevel
         let trimmed = composerInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return }
 
         if Self.resetTriggers.contains(trimmed.lowercased()) {
-            if self.input == sourceInput { self.input = "" }
+            if self.composerMutationRevision == sourceComposerMutationRevision { self.input = "" }
             await self.performReset()
             return
         }
         if Self.compactTriggers.contains(trimmed.lowercased()) {
-            if self.input == sourceInput { self.input = "" }
+            if self.composerMutationRevision == sourceComposerMutationRevision { self.input = "" }
             await self.performCompact()
             return
         }
@@ -773,7 +793,6 @@ public final class OpenClawChatViewModel {
         let preparationStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         let runId = UUID().uuidString
         let messageText = trimmed.isEmpty && !attachments.isEmpty ? "See attached." : trimmed
-        let thinkingLevel = self.thinkingLevel
         self.pendingRuns.insert(runId)
         self.preparingRuns.insert(runId)
         self.armPendingRunTimeout(runId: runId)
@@ -781,8 +800,12 @@ public final class OpenClawChatViewModel {
         self.streamingAssistantText = nil
         // Snapshot and clear the composer before the first suspension point. Diagnostic hooks
         // must never cause a later continuation to erase a draft or attachment added meanwhile.
-        if self.input == sourceInput { self.input = "" }
-        if self.attachments.map(\.id) == attachments.map(\.id) { self.attachments = [] }
+        var clearedComposerMutationRevision: UInt64?
+        if self.composerMutationRevision == sourceComposerMutationRevision {
+            self.input = ""
+            self.attachments = []
+            clearedComposerMutationRevision = self.composerMutationRevision
+        }
         defer { self.preparingRuns.remove(runId) }
 
         // Append without awaiting diagnostics so clearing the composer always has immediate,
@@ -879,22 +902,25 @@ public final class OpenClawChatViewModel {
         } catch is CancellationError {
             self.messages.removeAll { $0.id == optimisticMessageID }
             if self.isCurrentSessionRequest(sessionRequest) {
-                // Restore the captured composer as one unit only when the user has not started a
-                // replacement draft. Mixing old text or attachments with new work can leak data.
-                if self.input.isEmpty, self.attachments.isEmpty {
+                // Restore the captured composer as one unit only while we still own the exact
+                // state produced by our clear. Even an edit that returns to the same visible text,
+                // or a deliberate clear after dispatch, advances the revision and wins.
+                if let clearedComposerMutationRevision,
+                   self.composerMutationRevision == clearedComposerMutationRevision
+                {
                     self.input = sourceInput
-                    self.attachments = attachments
+                    self.attachments = sourceAttachments
                 }
             }
             self.clearPendingRun(runId)
         } catch {
             self.messages.removeAll { $0.id == optimisticMessageID }
             if self.isCurrentSessionRequest(sessionRequest),
-               self.input.isEmpty,
-               self.attachments.isEmpty
+               let clearedComposerMutationRevision,
+               self.composerMutationRevision == clearedComposerMutationRevision
             {
                 self.input = sourceInput
-                self.attachments = attachments
+                self.attachments = sourceAttachments
             }
             self.clearPendingRun(runId)
             if self.isCurrentSessionRequest(sessionRequest) {
@@ -1070,6 +1096,9 @@ public final class OpenClawChatViewModel {
     }
 
     private func performSelectThinkingLevel(_ level: String) async {
+        // Re-check after the public method's unstructured Task reaches the main actor. A picker
+        // tap queued immediately before Send may not begin until Send has already claimed the turn.
+        guard !self.isPreparingSend, !self.isSending else { return }
         let next = Self.normalizedThinkingLevel(level) ?? "off"
         guard next != self.thinkingLevel else { return }
 
@@ -1099,7 +1128,13 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func performSelectModel(_ selectionID: String) async {
+    private func performSelectModel(
+        _ selectionID: String,
+        allowDuringSendPreparation: Bool = false
+    ) async {
+        // The authorized-send repair is the only model mutation allowed after Send claims the
+        // turn. A picker Task queued one run-loop earlier must not change the charged dispatch.
+        guard allowDuringSendPreparation || (!self.isPreparingSend && !self.isSending) else { return }
         let next = self.normalizedSelectionID(selectionID)
         guard next != self.modelSelectionID else { return }
 

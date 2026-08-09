@@ -1895,6 +1895,108 @@ extension TestChatTransportState {
         #expect(await MainActor.run { vm.attachments.map(\.fileName) } == ["new.txt"])
     }
 
+    @Test func authorizedSendDoesNotClearDraftEditedAwayAndBackToSameText() async throws {
+        let preDispatchStarted = AsyncGate()
+        let allowDispatch = AsyncGate()
+        let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "same visible draft"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                await preDispatchStarted.open()
+                await allowDispatch.wait()
+                return true
+            }
+        }
+        await preDispatchStarted.wait()
+        await MainActor.run {
+            vm.input = "temporary edit"
+            vm.input = "same visible draft"
+        }
+        await allowDispatch.open()
+
+        try await waitUntil("snapshotted send completes") {
+            await transport.lastSentRunId() != nil
+        }
+        #expect(await transport.sentMessages() == ["same visible draft"])
+        #expect(await MainActor.run { vm.input } == "same visible draft")
+    }
+
+    @Test func failedAuthorizedSendDoesNotRestoreDraftAfterUserClearsComposer() async throws {
+        let gate = AsyncGate()
+        struct ExpectedFailure: Error {}
+        let transport = TestChatTransport(
+            historyResponses: [historyPayload()],
+            sendPreparationHook: { phase in
+                if phase == .started { await gate.wait() }
+            },
+            sendMessageHook: { _ in throw ExpectedFailure() })
+        let vm = await MainActor.run {
+            OpenClawChatViewModel(sessionKey: "main", transport: transport)
+        }
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "do not resurrect"
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID)
+        }
+        try await waitUntil("send reaches start marker") {
+            await transport.sendPreparationPhases() == [.started]
+        }
+        await MainActor.run {
+            vm.input = "changed my mind"
+            vm.input = ""
+        }
+        await gate.open()
+
+        try await waitUntil("failed send settles") {
+            await MainActor.run { !vm.isSending && !vm.isPreparingSend }
+        }
+        #expect(await MainActor.run { vm.input.isEmpty })
+    }
+
+    @Test func authorizedSendLocksModelAndThinkingUntilDispatchIsAccepted() async throws {
+        let preDispatchStarted = AsyncGate()
+        let allowDispatch = AsyncGate()
+        let openAIModel = modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai")
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            modelResponses: [[openAIModel]])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "use accepted controls"
+            // These picker tasks are queued immediately before Send claims the turn. Their public
+            // synchronous guard passes, so the actor-side guard must still reject them later.
+            vm.selectModel(openAIModel.selectionID)
+            vm.selectThinkingLevel("high")
+            vm.send(modelSelectionID: OpenClawChatViewModel.defaultModelSelectionID) {
+                await preDispatchStarted.open()
+                await allowDispatch.wait()
+                return true
+            }
+        }
+        await preDispatchStarted.wait()
+        await MainActor.run {
+            vm.selectModel(openAIModel.selectionID)
+            vm.selectThinkingLevel("high")
+        }
+
+        #expect(await MainActor.run {
+            vm.modelSelectionID == OpenClawChatViewModel.defaultModelSelectionID &&
+                vm.thinkingLevel == "off"
+        })
+        #expect(await transport.patchedModels().isEmpty)
+        #expect(await transport.patchedThinkingLevels().isEmpty)
+        await allowDispatch.open()
+
+        try await waitUntil("send with accepted controls completes") {
+            await transport.lastSentRunId() != nil
+        }
+        #expect(await transport.sentThinkingLevels() == ["off"])
+    }
+
     @Test func authorizedSendDoesNotConsumePreDispatchWorkWhenHealthRejectsPayload() async throws {
         let beforeDispatchCount = AsyncCounter()
         let (transport, vm) = await makeViewModel(
@@ -2083,9 +2185,8 @@ extension TestChatTransportState {
         ])
 
         await MainActor.run { vm.selectThinkingLevel("high") }
-        try await waitUntil("thinking level changed while send is blocked") {
-            await MainActor.run { vm.thinkingLevel == "high" }
-        }
+        #expect(await MainActor.run { vm.thinkingLevel } == "off")
+        #expect(await transport.patchedThinkingLevels().isEmpty)
 
         await gate.open()
 
