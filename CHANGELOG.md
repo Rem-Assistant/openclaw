@@ -58,6 +58,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Gateway/chat: suppress direct-chat sender metadata for canonical iOS, macOS, and Android clients in UI mode so device display names are not injected into agent turns, while preserving node-session identity and handshake policy.
 - iOS/macOS chat: cancel and generation-guard overlapping history bootstraps so a stale session response cannot replace the active transcript or clear its loading state.
 - Gateway: clear speculative node wake state when APNs registration is missing, preventing unregistered or mistyped node IDs from retaining wake throttle entries. Fixes #68847. (#68848) Thanks @Feelw00.
 - Auto-reply: keep late follow-up queue drain finalizers from deleting a replacement queue registered after `/stop`, preventing immediate follow-up messages from being orphaned. Fixes #68838. (#68839) Thanks @Feelw00.

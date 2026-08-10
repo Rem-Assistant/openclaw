@@ -3384,4 +3384,62 @@ describe("chat.send operator UI client sender context", () => {
     expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
   });
+
+  it("does not inject native app UI display names as sender identity", async () => {
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-native-ui-sender",
+      message: "hello from native ui",
+      client: {
+        connect: {
+          client: {
+            id: GATEWAY_CLIENT_NAMES.IOS_APP,
+            displayName: "RemAgent",
+            mode: GATEWAY_CLIENT_MODES.UI,
+            version: "dev",
+            platform: "ios",
+          },
+          scopes: ["operator.write"],
+        },
+      },
+      expectBroadcast: false,
+    });
+
+    expect(mockState.lastDispatchCtx?.SenderId).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
+  });
+
+  it("retains sender identity for native app node sessions", async () => {
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-native-node-sender",
+      message: "hello from native node",
+      client: {
+        connect: {
+          client: {
+            id: GATEWAY_CLIENT_NAMES.IOS_APP,
+            displayName: "RemAgent",
+            mode: GATEWAY_CLIENT_MODES.NODE,
+            version: "dev",
+            platform: "ios",
+          },
+          scopes: ["operator.write"],
+        },
+      },
+      expectBroadcast: false,
+    });
+
+    expect(mockState.lastDispatchCtx?.SenderId).toBe(GATEWAY_CLIENT_NAMES.IOS_APP);
+    expect(mockState.lastDispatchCtx?.SenderName).toBe("RemAgent");
+    expect(mockState.lastDispatchCtx?.SenderUsername).toBe("RemAgent");
+  });
 });

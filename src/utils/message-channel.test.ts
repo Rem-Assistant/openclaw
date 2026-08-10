@@ -3,10 +3,14 @@ import type { ChannelPlugin } from "../channels/plugins/types.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
   INTERNAL_NON_DELIVERY_CHANNELS,
   isInternalNonDeliveryChannel,
   isMarkdownCapableMessageChannel,
+  isOperatorUiClient,
   resolveGatewayMessageChannel,
+  shouldSuppressChatSenderIdentity,
 } from "./message-channel.js";
 
 const emptyRegistry = createTestRegistry([]);
@@ -79,5 +83,40 @@ describe("message-channel", () => {
       ]),
     );
     expect(isMarkdownCapableMessageChannel("demo-markdown-channel")).toBe(true);
+  });
+
+  it.each([
+    GATEWAY_CLIENT_NAMES.IOS_APP,
+    GATEWAY_CLIENT_NAMES.MACOS_APP,
+    GATEWAY_CLIENT_NAMES.ANDROID_APP,
+  ])("suppresses native app chat sender identity only in UI mode (%s)", (id) => {
+    expect(shouldSuppressChatSenderIdentity({ id, mode: GATEWAY_CLIENT_MODES.UI })).toBe(true);
+    expect(shouldSuppressChatSenderIdentity({ id, mode: GATEWAY_CLIENT_MODES.NODE })).toBe(false);
+    expect(isOperatorUiClient({ id, mode: GATEWAY_CLIENT_MODES.UI })).toBe(false);
+    expect(isOperatorUiClient({ id, mode: GATEWAY_CLIENT_MODES.NODE })).toBe(false);
+  });
+
+  it("retains mode-independent Control UI and TUI classification", () => {
+    expect(
+      isOperatorUiClient({
+        id: GATEWAY_CLIENT_NAMES.CONTROL_UI,
+        mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+      }),
+    ).toBe(true);
+    expect(
+      isOperatorUiClient({ id: GATEWAY_CLIENT_NAMES.TUI, mode: GATEWAY_CLIENT_MODES.CLI }),
+    ).toBe(true);
+    expect(
+      shouldSuppressChatSenderIdentity({
+        id: GATEWAY_CLIENT_NAMES.CONTROL_UI,
+        mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+      }),
+    ).toBe(true);
+    expect(
+      shouldSuppressChatSenderIdentity({
+        id: GATEWAY_CLIENT_NAMES.TUI,
+        mode: GATEWAY_CLIENT_MODES.CLI,
+      }),
+    ).toBe(true);
   });
 });

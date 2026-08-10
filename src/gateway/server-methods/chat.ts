@@ -52,9 +52,9 @@ import {
 import {
   INTERNAL_MESSAGE_CHANNEL,
   isGatewayCliClient,
-  isOperatorUiClient,
   isWebchatClient,
   normalizeMessageChannel,
+  shouldSuppressChatSenderIdentity,
 } from "../../utils/message-channel.js";
 import {
   abortChatRunById,
@@ -2269,7 +2269,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         ...(commandSource ? { CommandSource: commandSource } : {}),
         CommandAuthorized: true,
         MessageSid: clientRunId,
-        ...(!isOperatorUiClient(clientInfo)
+        ...(!shouldSuppressChatSenderIdentity(clientInfo)
           ? {
               SenderId: clientInfo?.id,
               SenderName: clientInfo?.displayName,
