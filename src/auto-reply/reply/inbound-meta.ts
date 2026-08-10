@@ -381,14 +381,17 @@ export function buildInboundMetaSystemPrompt(
   // Resolve channel identity: prefer explicit channel, then surface, then provider.
   // For webchat/Hub Chat sessions (when Surface is 'webchat' or undefined with no real channel),
   // omit the channel field entirely rather than falling back to an unrelated provider.
-  const channelValue = resolveInboundChannel(ctx);
+  const gatewayPromptSurface = normalizePromptMetadataString(ctx.GatewayPromptSurface);
+  const resolvedChannel = resolveInboundChannel(ctx);
+  const channelValue =
+    gatewayPromptSurface && resolvedChannel === "webchat" ? undefined : resolvedChannel;
 
   const payload = {
     schema: "openclaw.inbound_meta.v2",
     account_id: normalizePromptMetadataString(ctx.AccountId),
     channel: channelValue,
-    provider: normalizePromptMetadataString(ctx.Provider),
-    surface: normalizePromptMetadataString(ctx.Surface),
+    provider: gatewayPromptSurface ? undefined : normalizePromptMetadataString(ctx.Provider),
+    surface: gatewayPromptSurface ?? normalizePromptMetadataString(ctx.Surface),
     chat_type: chatType ?? (isDirect ? "direct" : undefined),
     response_format:
       options?.includeFormattingHints === false ? undefined : resolveInboundFormattingHints(ctx),

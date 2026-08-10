@@ -54,6 +54,7 @@ import {
   isGatewayCliClient,
   isWebchatClient,
   normalizeMessageChannel,
+  resolveNativeAppChatPromptSurface,
   shouldSuppressChatSenderIdentity,
 } from "../../utils/message-channel.js";
 import {
@@ -2277,6 +2278,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             }
           : {}),
         GatewayClientScopes: client?.connect?.scopes ?? [],
+        GatewayPromptSurface: resolveNativeAppChatPromptSurface(clientInfo),
         ...pluginBoundMediaFields,
       };
       if (mediaPathOffloadPaths.length > 0) {

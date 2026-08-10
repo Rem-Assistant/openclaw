@@ -1782,6 +1782,52 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     });
   });
 
+  it("native app UI keeps inherited external channel context without sender identity", async () => {
+    createTranscriptFixture("openclaw-chat-send-native-ui-channel-scoped-inherit-");
+    mockState.finalText = "ok";
+    mockState.sessionEntry = {
+      deliveryContext: {
+        channel: "imessage",
+        to: "+8619800001234",
+        accountId: "default",
+      },
+      lastChannel: "imessage",
+      lastTo: "+8619800001234",
+      lastAccountId: "default",
+    };
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-native-ui-channel-scoped-inherit",
+      client: {
+        connect: {
+          client: {
+            mode: GATEWAY_CLIENT_MODES.UI,
+            id: GATEWAY_CLIENT_NAMES.IOS_APP,
+            displayName: "RemAgent",
+          },
+        },
+      } as unknown,
+      sessionKey: "agent:main:imessage:direct:+8619800001234",
+      deliver: true,
+      expectBroadcast: false,
+    });
+
+    expectDispatchContextFields({
+      OriginatingChannel: "imessage",
+      OriginatingTo: "+8619800001234",
+      ExplicitDeliverRoute: true,
+      AccountId: "default",
+    });
+    expect(mockState.lastDispatchCtx?.GatewayPromptSurface).toBe("rem");
+    expect(mockState.lastDispatchCtx?.SenderId).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
+  });
+
   it("chat.send accepts admin-scoped synthetic originating routes without external delivery", async () => {
     createTranscriptFixture("openclaw-chat-send-synthetic-origin-admin-");
     mockState.finalText = "ok";
@@ -3383,6 +3429,7 @@ describe("chat.send operator UI client sender context", () => {
     expect(mockState.lastDispatchCtx?.SenderId).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.GatewayPromptSurface).toBeUndefined();
   });
 
   it("does not inject native app UI display names as sender identity", async () => {
@@ -3412,6 +3459,10 @@ describe("chat.send operator UI client sender context", () => {
     expect(mockState.lastDispatchCtx?.SenderId).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
+    expect(mockState.lastDispatchCtx?.GatewayPromptSurface).toBe("rem");
+    expect(mockState.lastDispatchCtx?.Provider).toBe("webchat");
+    expect(mockState.lastDispatchCtx?.Surface).toBe("webchat");
+    expect(mockState.lastDispatchCtx?.OriginatingChannel).toBe("webchat");
   });
 
   it("retains sender identity for native app node sessions", async () => {
@@ -3441,5 +3492,6 @@ describe("chat.send operator UI client sender context", () => {
     expect(mockState.lastDispatchCtx?.SenderId).toBe(GATEWAY_CLIENT_NAMES.IOS_APP);
     expect(mockState.lastDispatchCtx?.SenderName).toBe("RemAgent");
     expect(mockState.lastDispatchCtx?.SenderUsername).toBe("RemAgent");
+    expect(mockState.lastDispatchCtx?.GatewayPromptSurface).toBeUndefined();
   });
 });

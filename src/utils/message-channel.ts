@@ -48,11 +48,8 @@ export function isOperatorUiClient(client?: GatewayClientInfoLike | null): boole
   return clientId === GATEWAY_CLIENT_NAMES.CONTROL_UI || clientId === GATEWAY_CLIENT_NAMES.TUI;
 }
 
-export function shouldSuppressChatSenderIdentity(client?: GatewayClientInfoLike | null): boolean {
+function isNativeAppUiClient(client?: GatewayClientInfoLike | null): boolean {
   const clientId = normalizeGatewayClientName(client?.id);
-  if (isOperatorUiClient(client)) {
-    return true;
-  }
   if (normalizeGatewayClientMode(client?.mode) !== GATEWAY_CLIENT_MODES.UI) {
     return false;
   }
@@ -61,6 +58,16 @@ export function shouldSuppressChatSenderIdentity(client?: GatewayClientInfoLike 
     clientId === GATEWAY_CLIENT_NAMES.MACOS_APP ||
     clientId === GATEWAY_CLIENT_NAMES.ANDROID_APP
   );
+}
+
+export function shouldSuppressChatSenderIdentity(client?: GatewayClientInfoLike | null): boolean {
+  return isOperatorUiClient(client) || isNativeAppUiClient(client);
+}
+
+export function resolveNativeAppChatPromptSurface(
+  client?: GatewayClientInfoLike | null,
+): "rem" | undefined {
+  return isNativeAppUiClient(client) ? "rem" : undefined;
 }
 
 export function isBrowserOperatorUiClient(client?: GatewayClientInfoLike | null): boolean {

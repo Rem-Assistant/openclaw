@@ -246,6 +246,51 @@ describe("buildInboundMetaSystemPrompt", () => {
     const payload = parseInboundMetaPayload(prompt);
     expect(payload["response_format"]).toBeUndefined();
   });
+
+  it("identifies a native Rem UI without exposing internal webchat routing", () => {
+    const prompt = buildInboundMetaSystemPrompt({
+      OriginatingChannel: "webchat",
+      Provider: "webchat",
+      Surface: "webchat",
+      GatewayPromptSurface: "rem",
+      ChatType: "direct",
+    } as TemplateContext);
+
+    const payload = parseInboundMetaPayload(prompt);
+    expect(payload["surface"]).toBe("rem");
+    expect(payload["channel"]).toBeUndefined();
+    expect(payload["provider"]).toBeUndefined();
+    expect(prompt).not.toContain("webchat");
+  });
+
+  it("keeps external channel identity unchanged without a gateway prompt surface", () => {
+    const prompt = buildInboundMetaSystemPrompt({
+      OriginatingChannel: "whatsapp",
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      ChatType: "direct",
+    } as TemplateContext);
+
+    const payload = parseInboundMetaPayload(prompt);
+    expect(payload["surface"]).toBe("whatsapp");
+    expect(payload["channel"]).toBe("whatsapp");
+    expect(payload["provider"]).toBe("whatsapp");
+  });
+
+  it("keeps an external channel visible when a native Rem UI targets it", () => {
+    const prompt = buildInboundMetaSystemPrompt({
+      OriginatingChannel: "whatsapp",
+      Provider: "webchat",
+      Surface: "webchat",
+      GatewayPromptSurface: "rem",
+      ChatType: "direct",
+    } as TemplateContext);
+
+    const payload = parseInboundMetaPayload(prompt);
+    expect(payload["surface"]).toBe("rem");
+    expect(payload["channel"]).toBe("whatsapp");
+    expect(payload["provider"]).toBeUndefined();
+  });
 });
 
 describe("buildInboundUserContextPrefix", () => {

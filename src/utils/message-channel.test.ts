@@ -9,6 +9,7 @@ import {
   isInternalNonDeliveryChannel,
   isMarkdownCapableMessageChannel,
   isOperatorUiClient,
+  resolveNativeAppChatPromptSurface,
   resolveGatewayMessageChannel,
   shouldSuppressChatSenderIdentity,
 } from "./message-channel.js";
@@ -94,6 +95,10 @@ describe("message-channel", () => {
     expect(shouldSuppressChatSenderIdentity({ id, mode: GATEWAY_CLIENT_MODES.NODE })).toBe(false);
     expect(isOperatorUiClient({ id, mode: GATEWAY_CLIENT_MODES.UI })).toBe(false);
     expect(isOperatorUiClient({ id, mode: GATEWAY_CLIENT_MODES.NODE })).toBe(false);
+    expect(resolveNativeAppChatPromptSurface({ id, mode: GATEWAY_CLIENT_MODES.UI })).toBe("rem");
+    expect(
+      resolveNativeAppChatPromptSurface({ id, mode: GATEWAY_CLIENT_MODES.NODE }),
+    ).toBeUndefined();
   });
 
   it("retains mode-independent Control UI and TUI classification", () => {
@@ -118,5 +123,17 @@ describe("message-channel", () => {
         mode: GATEWAY_CLIENT_MODES.CLI,
       }),
     ).toBe(true);
+    expect(
+      resolveNativeAppChatPromptSurface({
+        id: GATEWAY_CLIENT_NAMES.CONTROL_UI,
+        mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveNativeAppChatPromptSurface({
+        id: GATEWAY_CLIENT_NAMES.TUI,
+        mode: GATEWAY_CLIENT_MODES.CLI,
+      }),
+    ).toBeUndefined();
   });
 });
