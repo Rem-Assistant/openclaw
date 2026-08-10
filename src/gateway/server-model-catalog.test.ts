@@ -98,6 +98,72 @@ describe("loadGatewayModelCatalog", () => {
     });
   });
 
+  it("lets a configured read reuse a prepared complete full-catalog snapshot", async () => {
+    const fullModels = [model("gpt-5.5"), model("sonnet-4.6")];
+    const persistedModels = [model("gpt-5.5")];
+    const loadModelCatalogSnapshot = vi.fn(async ({ readOnly }: { readOnly?: boolean }) =>
+      readOnly === false
+        ? { models: fullModels, complete: true, source: "provider-discovery" as const }
+        : { models: persistedModels, complete: false, source: "persisted-catalog" as const },
+    );
+
+    await expect(
+      loadGatewayModelCatalogSnapshot({
+        getConfig,
+        loadModelCatalogSnapshot,
+        readOnly: false,
+      }),
+    ).resolves.toEqual({
+      models: fullModels,
+      complete: true,
+      source: "provider-discovery",
+    });
+    await expect(
+      loadGatewayModelCatalogSnapshot({
+        getConfig,
+        loadModelCatalogSnapshot,
+        readOnly: true,
+        preferCachedComplete: true,
+      }),
+    ).resolves.toEqual({
+      models: fullModels,
+      complete: true,
+      source: "provider-discovery",
+    });
+
+    expect(loadModelCatalogSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reuse a stale complete snapshot for a configured read", async () => {
+    const fullModels = [model("gpt-5.5"), model("sonnet-4.6")];
+    const persistedModels = [model("gpt-5.5")];
+    const loadModelCatalogSnapshot = vi.fn(async ({ readOnly }: { readOnly?: boolean }) =>
+      readOnly === false
+        ? { models: fullModels, complete: true, source: "provider-discovery" as const }
+        : { models: persistedModels, complete: false, source: "persisted-catalog" as const },
+    );
+
+    await loadGatewayModelCatalogSnapshot({
+      getConfig,
+      loadModelCatalogSnapshot,
+      readOnly: false,
+    });
+    markGatewayModelCatalogStaleForReload();
+
+    await expect(
+      loadGatewayModelCatalogSnapshot({
+        getConfig,
+        loadModelCatalogSnapshot,
+        readOnly: true,
+        preferCachedComplete: true,
+      }),
+    ).resolves.toEqual({
+      models: persistedModels,
+      complete: false,
+      source: "persisted-catalog",
+    });
+  });
+
   it("caches an empty read-only catalog until reload marks it stale", async () => {
     const emptyCatalog: GatewayModelChoice[] = [];
     const freshCatalog = [model("gpt-5.5")];

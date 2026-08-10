@@ -1,8 +1,7 @@
 import { getRuntimeConfig } from "../config/io.js";
 
 export type GatewayModelChoice = import("../agents/model-catalog.js").ModelCatalogEntry;
-export type GatewayModelCatalogSnapshot =
-  import("../agents/model-catalog.js").ModelCatalogSnapshot;
+export type GatewayModelCatalogSnapshot = import("../agents/model-catalog.js").ModelCatalogSnapshot;
 
 type GatewayModelCatalogConfig = ReturnType<typeof getRuntimeConfig>;
 type LoadModelCatalog = (params: {
@@ -18,6 +17,7 @@ type LoadGatewayModelCatalogParams = {
   loadModelCatalog?: LoadModelCatalog;
   loadModelCatalogSnapshot?: LoadModelCatalogSnapshot;
   readOnly?: boolean;
+  preferCachedComplete?: boolean;
 };
 
 type GatewayModelCatalogCache = {
@@ -127,6 +127,16 @@ export async function loadGatewayModelCatalog(
 export async function loadGatewayModelCatalogSnapshot(
   params?: LoadGatewayModelCatalogParams,
 ): Promise<GatewayModelCatalogSnapshot> {
+  if (params?.preferCachedComplete === true) {
+    const cachedComplete = fullModelCatalogCache.lastSuccessfulCatalog;
+    if (
+      !isGatewayModelCatalogStale(fullModelCatalogCache) &&
+      cachedComplete?.complete === true &&
+      cachedComplete.models.length > 0
+    ) {
+      return cachedComplete;
+    }
+  }
   const cache = resolveGatewayModelCatalogCache(params);
   const isStale = isGatewayModelCatalogStale(cache);
   if (!isStale && cache.lastSuccessfulCatalog !== null) {

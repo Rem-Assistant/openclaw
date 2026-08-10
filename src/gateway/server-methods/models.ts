@@ -46,7 +46,11 @@ async function loadModelsListCatalog(
   }
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = Symbol("models-list-catalog-timeout");
-  const catalogPromise = context.loadGatewayModelCatalogSnapshot({ readOnly: true });
+  // Manage-model clients prime the complete cache with `view: "all"`, then request the filtered
+  // configured view. Default chat reads retain the existing short read-only request unchanged.
+  const catalogPromise = context.loadGatewayModelCatalogSnapshot(
+    view === "configured" ? { readOnly: true, preferCachedComplete: true } : { readOnly: true },
+  );
   const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
     timeout = setTimeout(() => resolve(timedOut), MODELS_LIST_CATALOG_TIMEOUT_MS);
     timeout.unref?.();

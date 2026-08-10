@@ -80,7 +80,10 @@ describe("models.list", () => {
         },
         undefined,
       );
-      expect(loadGatewayModelCatalogSnapshot).toHaveBeenCalledWith({ readOnly: true });
+      expect(loadGatewayModelCatalogSnapshot).toHaveBeenCalledWith({
+        readOnly: true,
+        preferCachedComplete: true,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -183,6 +186,35 @@ describe("models.list", () => {
       { models, catalogComplete: false, catalogSource: "persisted-catalog" },
       undefined,
     );
+  });
+
+  it("keeps the default view on the bounded read-only catalog path", async () => {
+    const respond = vi.fn();
+    const loadGatewayModelCatalogSnapshot = vi.fn(async () => ({
+      models: [],
+      complete: false,
+      source: "static-fallback" as const,
+    }));
+
+    await modelsHandlers["models.list"]({
+      req: {
+        type: "req",
+        id: "req-models-list-default-bounded",
+        method: "models.list",
+        params: {},
+      },
+      params: {},
+      respond,
+      client: null,
+      isWebchatConnect: () => false,
+      context: {
+        getRuntimeConfig: () => ({}) as OpenClawConfig,
+        loadGatewayModelCatalogSnapshot,
+        logGateway: { debug: vi.fn() },
+      } as never,
+    });
+
+    expect(loadGatewayModelCatalogSnapshot).toHaveBeenCalledWith({ readOnly: true });
   });
 
   it("loads the full catalog for provider-scoped configured view and filters only providers", async () => {
@@ -300,9 +332,7 @@ describe("models.list", () => {
       isWebchatConnect: () => false,
       context: {
         getRuntimeConfig: () => ({}) as OpenClawConfig,
-        loadGatewayModelCatalogSnapshot: vi.fn(() =>
-          Promise.reject(new Error("catalog failed")),
-        ),
+        loadGatewayModelCatalogSnapshot: vi.fn(() => Promise.reject(new Error("catalog failed"))),
         logGateway: {
           debug: vi.fn(),
         },

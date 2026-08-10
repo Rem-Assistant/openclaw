@@ -1,5 +1,4 @@
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
-import type { GatewayModelCatalogSnapshot } from "../server-model-catalog.js";
 import type { CliDeps } from "../../cli/deps.types.js";
 import type { HealthSummary } from "../../commands/health.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -14,6 +13,7 @@ import type { PluginNodeCapabilitySurface } from "../plugin-node-capability.js";
 import type { ConnectParams, ErrorShape, RequestFrame } from "../protocol/index.js";
 import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "../server-broadcast-types.js";
 import type { ChannelRuntimeSnapshot } from "../server-channel-runtime.types.js";
+import type { GatewayModelCatalogSnapshot } from "../server-model-catalog.js";
 import type { DedupeEntry } from "../server-shared.js";
 import type { GatewayEventLoopHealth } from "../server/event-loop-health.js";
 
@@ -50,6 +50,7 @@ export type GatewayRequestContext = {
   loadGatewayModelCatalog: (params?: { readOnly?: boolean }) => Promise<ModelCatalogEntry[]>;
   loadGatewayModelCatalogSnapshot: (params?: {
     readOnly?: boolean;
+    preferCachedComplete?: boolean;
   }) => Promise<GatewayModelCatalogSnapshot>;
   getHealthCache: () => HealthSummary | null;
   refreshHealthSnapshot: (opts?: {
