@@ -1664,8 +1664,17 @@ public final class OpenClawChatViewModel {
 
         switch evt.stream {
         case "assistant":
-            if let text = evt.data["text"]?.value as? String {
-                self.streamingAssistantText = text
+            // `text` is the full cumulative text, `delta` the appended suffix, `replace` a
+            // producer-declared rewrite. Merge them the way upstream does instead of blindly
+            // assigning `text`, which drops delta-only events and lets a stale shorter text
+            // regress the buffer. See `mergedStreamingAssistantText` for the contract.
+            if let merged = Self.mergedStreamingAssistantText(
+                previous: self.streamingAssistantText,
+                text: evt.data["text"]?.value as? String,
+                delta: evt.data["delta"]?.value as? String,
+                replace: (evt.data["replace"]?.value as? Bool) ?? false)
+            {
+                self.streamingAssistantText = merged
             }
         case "tool":
             guard let phase = evt.data["phase"]?.value as? String else { return }
@@ -1685,6 +1694,72 @@ public final class OpenClawChatViewModel {
         default:
             break
         }
+    }
+
+    /// Merges one upstream `assistant` agent event into the streaming buffer.
+    ///
+    /// Upstream contract (openclaw repo-root paths):
+    /// - `buildAssistantStreamData` (`src/agents/pi-embedded-subscribe.handlers.messages.ts:355`)
+    ///   emits `{ text, delta, replace? }`. `text` is the FULL cumulative cleaned text, `delta`
+    ///   the appended suffix. `replace` is set only when the new text is not a prefix-extension
+    ///   of what was already streamed (`…:571`) and is omitted entirely when false (`…:373`),
+    ///   so an absent key means false. When `replace` is true, `delta` is deliberately `""`.
+    /// - Other producers (`src/agents/cli-runner/execute.ts:468`,
+    ///   `src/agents/command/attempt-execution.ts:710`) emit `{ text, delta }` with no `replace`;
+    ///   their `text` is cumulative too (`src/agents/cli-output.ts:375`).
+    /// - Delta-only events with no `text` are a real shape
+    ///   (`src/gateway/test-helpers.agent-results.ts:75`).
+    ///
+    /// Rules 1-5 mirror upstream's canonical consumer `resolveMergedAssistantText`
+    /// (`src/gateway/live-chat-projector.ts:23`), which both the gateway's own chat projection
+    /// (`src/gateway/server-chat.ts:399`) and the TUI (`src/tui/embedded-backend.ts:519`) use.
+    ///
+    /// Returns `nil` when the event carries no usable update, so the caller leaves the buffer
+    /// untouched rather than writing a regression.
+    private static func mergedStreamingAssistantText(
+        previous: String?,
+        text: String?,
+        delta: String?,
+        replace: Bool) -> String?
+    {
+        let previousText = previous ?? ""
+        let nextText = text ?? ""
+        let nextDelta = delta ?? ""
+
+        // 0. A producer-declared rewrite wins outright. Upstream's projector infers "rewrite"
+        //    from prefix relations, but the flag is the structured signal (CLAUDE.md principle 5)
+        //    and it also covers the one case prefix inference gets wrong: a rewrite that SHRINKS
+        //    the text to a prefix of what we already have (directive stripping), where rule 2
+        //    would otherwise pin the stale longer text on screen forever. This matches
+        //    `src/gateway/openresponses-http.ts:936`, the upstream consumer that reads `replace`.
+        if replace, !nextText.isEmpty {
+            return nextText
+        }
+
+        if !nextText.isEmpty, !previousText.isEmpty {
+            // 1. Normal append: the cumulative text extends what we have and is authoritative.
+            if nextText.hasPrefix(previousText), nextText.count > previousText.count {
+                return nextText
+            }
+            // 2. Monotonic guard: a shorter, stale full text (a replayed or out-of-order event)
+            //    must never shrink the buffer. The gateway forwards out-of-order events rather
+            //    than dropping or reordering them — it only flags a synthetic "seq gap" error
+            //    alongside (`src/gateway/server-chat.ts:629`) — so the client absorbs this itself.
+            if previousText.hasPrefix(nextText), nextDelta.isEmpty {
+                return nil
+            }
+        }
+        // 3. Delta-only event (no usable `text`), or a non-extending text that still carries an
+        //    append. The previous handler dropped these entirely and lost the content.
+        if !nextDelta.isEmpty {
+            return previousText + nextDelta
+        }
+        // 4. First event of a stream, or a rewrite that did not set `replace`.
+        if !nextText.isEmpty {
+            return nextText
+        }
+        // 5. Neither field usable — leave the buffer alone.
+        return nil
     }
 
     private func refreshHistoryAfterRun(request: SessionRequest) async {

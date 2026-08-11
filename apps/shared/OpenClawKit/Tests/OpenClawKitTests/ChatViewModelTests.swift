@@ -183,6 +183,36 @@ private func emitAssistantText(
                 data: ["text": AnyCodable(text)])))
 }
 
+/// Emits an upstream-shaped `assistant` agent event.
+///
+/// Mirrors `buildAssistantStreamData`
+/// (openclaw `src/agents/pi-embedded-subscribe.handlers.messages.ts:355`): `text` is the full
+/// cumulative text, `delta` the appended suffix, and `replace` is omitted entirely when false
+/// rather than sent as `false` (`…:373`). Fields are omitted when nil so tests can reproduce
+/// delta-only events, which real producers do emit
+/// (`src/gateway/test-helpers.agent-results.ts:75`).
+private func emitAssistantStream(
+    transport: TestChatTransport,
+    runId: String,
+    seq: Int,
+    text: String? = nil,
+    delta: String? = nil,
+    replace: Bool = false)
+{
+    var data: [String: AnyCodable] = [:]
+    if let text { data["text"] = AnyCodable(text) }
+    if let delta { data["delta"] = AnyCodable(delta) }
+    if replace { data["replace"] = AnyCodable(true) }
+    transport.emit(
+        .agent(
+            OpenClawAgentEventPayload(
+                runId: runId,
+                seq: seq,
+                stream: "assistant",
+                ts: Int(Date().timeIntervalSince1970 * 1000),
+                data: data)))
+}
+
 private func emitToolStart(
     transport: TestChatTransport,
     runId: String,
@@ -1305,6 +1335,114 @@ extension TestChatTransportState {
 
         try await waitUntil("streaming cleared") { await MainActor.run { vm.streamingAssistantText == nil } }
         #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
+    }
+
+    // MARK: - assistant stream replace/delta merge
+    //
+    // These drive the real `handleAgentEvent` through the transport. The merge helper it calls
+    // is `private`, so `@testable import` cannot reach it — the only way to exercise the rules
+    // is through the handler, which is the point.
+
+    /// Delta-only events carry content in `delta` with no `text` at all. Assigning `data["text"]`
+    /// drops them and silently loses the tokens.
+    @Test func appliesDeltaOnlyAssistantEvents() async throws {
+        let sessionId = "sess-main"
+        let history = historyPayload(sessionId: sessionId)
+        let (transport, vm) = await makeViewModel(historyResponses: [history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: sessionId)
+
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 1, text: "Hello", delta: "Hello")
+        try await waitUntil("first chunk") {
+            await MainActor.run { vm.streamingAssistantText == "Hello" }
+        }
+
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 2, delta: " world")
+
+        try await waitUntil("delta-only chunk appended") {
+            await MainActor.run { vm.streamingAssistantText == "Hello world" }
+        }
+    }
+
+    /// `text` is cumulative, so a replayed or out-of-order event carrying a shorter full text
+    /// visibly truncates the bubble if it is assigned blindly. The gateway forwards out-of-order
+    /// events rather than dropping them (`src/gateway/server-chat.ts:629`), so the client must
+    /// hold the line itself. Upstream's own consumer does
+    /// (`resolveMergedAssistantText`, `src/gateway/live-chat-projector.ts:31`).
+    @Test func staleShorterAssistantTextDoesNotRegressStream() async throws {
+        let sessionId = "sess-main"
+        let history = historyPayload(sessionId: sessionId)
+        let (transport, vm) = await makeViewModel(historyResponses: [history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: sessionId)
+
+        emitAssistantStream(
+            transport: transport, runId: sessionId, seq: 1,
+            text: "Hello world, how are you", delta: "Hello world, how are you")
+        try await waitUntil("full text streamed") {
+            await MainActor.run { vm.streamingAssistantText == "Hello world, how are you" }
+        }
+
+        // Stale replay of an earlier prefix.
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 2, text: "Hello")
+
+        // Absence cannot be awaited, so drain the queue past the stale event with a sentinel
+        // on a different stream and only then assert the buffer is intact.
+        emitToolStart(transport: transport, runId: sessionId, seq: 3)
+        try await waitUntil("sentinel processed") {
+            await MainActor.run { vm.pendingToolCalls.count == 1 }
+        }
+
+        #expect(await MainActor.run { vm.streamingAssistantText } == "Hello world, how are you")
+    }
+
+    /// `replace: true` means the producer rewrote the message rather than appending
+    /// (`src/agents/pi-embedded-subscribe.handlers.messages.ts:571`). When the rewrite SHRINKS
+    /// the text to a prefix of what was streamed, the monotonic guard above would pin the stale
+    /// longer text on screen — only the explicit flag disambiguates. Guards the `replace` read
+    /// specifically; note this case also passes on the old assign-`text` handler by coincidence.
+    @Test func replaceFlagRewritesStreamToShorterText() async throws {
+        let sessionId = "sess-main"
+        let history = historyPayload(sessionId: sessionId)
+        let (transport, vm) = await makeViewModel(historyResponses: [history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: sessionId)
+
+        emitAssistantStream(
+            transport: transport, runId: sessionId, seq: 1,
+            text: "Hello world", delta: "Hello world")
+        try await waitUntil("initial text") {
+            await MainActor.run { vm.streamingAssistantText == "Hello world" }
+        }
+
+        // Rewrite to a strict prefix. delta is "" on replace, per upstream.
+        emitAssistantStream(
+            transport: transport, runId: sessionId, seq: 2, text: "Hello", delta: "", replace: true)
+
+        try await waitUntil("replace shrank the stream") {
+            await MainActor.run { vm.streamingAssistantText == "Hello" }
+        }
+    }
+
+    /// Headline acceptance case: one realistic run mixing append, delta-only, a stale replay and
+    /// a rewrite. Fails on a handler that reads only `data["text"]`.
+    @Test func mergesRealisticAssistantStreamSequence() async throws {
+        let sessionId = "sess-main"
+        let history = historyPayload(sessionId: sessionId)
+        let (transport, vm) = await makeViewModel(historyResponses: [history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: sessionId)
+
+        // 1-2: ordinary cumulative appends.
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 1, text: "Hel", delta: "Hel")
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 2, text: "Hello", delta: "lo")
+        // 3: cumulative append.
+        emitAssistantStream(
+            transport: transport, runId: sessionId, seq: 3, text: "Hello there", delta: " there")
+        // 4: stale replay of an earlier prefix — must not regress.
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 4, text: "Hello")
+        // 5: delta-only tail — must be appended.
+        emitAssistantStream(transport: transport, runId: sessionId, seq: 5, delta: ", friend")
+
+        try await waitUntil("merged stream") {
+            await MainActor.run { vm.streamingAssistantText == "Hello there, friend" }
+        }
     }
 
     @Test func seqGapClearsPendingRunsAndAutoRefreshesHistory() async throws {
